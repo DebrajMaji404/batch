@@ -93,6 +93,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println();
             out.println("import " + dtoClassFqn + ";");
             out.println("import " + wrapperClassFqn + ";");
+            out.println("import com.eazy.batch.autoconfigure.BatchProcessorProperties;");
             out.println("import com.eazy.batch.listener.JobCompletionListener;");
             out.println("import com.eazy.batch.constant.AppConstant;");
             out.println("import lombok.RequiredArgsConstructor;");
@@ -108,6 +109,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import org.springframework.batch.item.ItemReader;");
             out.println("import org.springframework.batch.item.ItemWriter;");
             out.println("import org.springframework.context.annotation.Bean;");
+            out.println("import org.springframework.context.annotation.Configuration;");
             out.println("import org.springframework.context.annotation.Configuration;");
             out.println("import org.springframework.transaction.PlatformTransactionManager;");
             out.println();
@@ -139,6 +141,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(INDENT + "private final JobRepository jobRepository;");
             out.println(INDENT + "private final PlatformTransactionManager transactionManager;");
             out.println(INDENT + "private final JobCompletionListener jobCompletionListener;");
+            out.println(INDENT + "private final BatchProcessorProperties properties;");
             out.println();
 
             // Job Bean
@@ -179,12 +182,12 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(INDENT + ") {");
             out.println(INDENT + INDENT + "log.info(\"Initializing batch step: {}\", \"" + stepName + "\");");
             out.println(INDENT + INDENT + "return new StepBuilder(\"" + stepName + "\", jobRepository)");
-            out.println(INDENT + INDENT + INDENT + INDENT + ".<" + dtoClassName + ", " + wrapperClassName + ">chunk(AppConstant.BatchJob.CHUNK_SIZE, transactionManager)");
+            out.println(INDENT + INDENT + INDENT + INDENT + ".<" + dtoClassName + ", " + wrapperClassName + ">chunk(properties.getDefaultChunkSize(), transactionManager)");
             out.println(INDENT + INDENT + INDENT + INDENT + ".reader(reader)");
             out.println(INDENT + INDENT + INDENT + INDENT + ".processor(processor)");
             out.println(INDENT + INDENT + INDENT + INDENT + ".writer(writer)");
             out.println(INDENT + INDENT + INDENT + INDENT + ".faultTolerant()");
-            out.println(INDENT + INDENT + INDENT + INDENT + ".skipLimit(AppConstant.BatchJob.SKIP_LIMIT)");
+            out.println(INDENT + INDENT + INDENT + INDENT + ".skipLimit(properties.getDefaultSkipLimit())");
             out.println(INDENT + INDENT + INDENT + INDENT + ".skip(Exception.class)");
             out.println(INDENT + INDENT + INDENT + INDENT + ".noRollback(Exception.class)");
             out.println(INDENT + INDENT + INDENT + INDENT + ".listener(skipListener)");
