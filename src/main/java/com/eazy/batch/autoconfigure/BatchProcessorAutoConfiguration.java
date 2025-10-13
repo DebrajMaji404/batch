@@ -7,15 +7,21 @@ import org.springframework.batch.core.configuration.annotation.EnableBatchProces
 import org.springframework.batch.core.launch.support.TaskExecutorJobLauncher;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.task.TaskExecutor;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.validation.beanvalidation.LocalValidatorFactoryBean;
+
+import javax.sql.DataSource;
 
 /**
  * Auto-configuration for batch processor starter
@@ -34,6 +40,44 @@ public class BatchProcessorAutoConfiguration {
         this.properties = properties;
         log.info("✅ Batch Processor Auto-Configuration initialized with properties: {}", properties);
     }
+
+
+
+    /**
+     * Smart batch table initializer - only creates tables if they don't exist
+     */
+    @Bean
+    public CommandLineRunner initializeBatchTables(DataSource dataSource, JdbcTemplate jdbcTemplate) {
+        return args -> {
+            try {
+                // Check if batch tables already exist using pg_tables
+                String checkTableQuery =
+                        "SELECT COUNT(*) FROM pg_tables " +
+                                "WHERE schemaname = 'public' AND tablename = 'batch_job_instance'";
+
+                Integer count = jdbcTemplate.queryForObject(checkTableQuery, Integer.class);
+
+                if (count != null && count > 0) {
+                    log.info("Spring Batch tables already exist. Skipping initialization.");
+                    return;
+                }
+
+                log.info("Spring Batch tables not found. Creating tables...");
+
+                ResourceDatabasePopulator populator = new ResourceDatabasePopulator();
+                populator.addScript(new ClassPathResource("schema-postgresql.sql"));
+                populator.setContinueOnError(false);
+                populator.execute(dataSource);
+
+                log.info("Spring Batch tables created successfully!");
+
+            } catch (Exception e) {
+                log.error("Error during batch table initialization: ", e);
+                throw new RuntimeException("Failed to initialize batch tables", e);
+            }
+        };
+    }
+
 
     /**
      * Task executor for batch jobs
