@@ -40,7 +40,7 @@ public class JobCompletionListener implements JobExecutionListener {
         }
 
         // Log skipped items
-        List<BatchSkippedItem<Object>> skipped = BatchUtility.getSkippedItems();
+        List<BatchSkippedItem<?>> skipped = BatchUtility.getSkippedItems();
         if (!skipped.isEmpty()) {
             log.warn("Job {} had {} skipped items",
                     jobExecution.getJobInstance().getJobName(),

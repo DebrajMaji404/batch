@@ -24,17 +24,17 @@ public class BatchUtility {
     /**
      * Store skipped items per job execution ID
      * This allows multiple batch jobs to run concurrently without interfering with each other
+     * Using Object to support dynamic types
      */
-    private static final Map<Long, List<BatchSkippedItem<Object>>> skippedItemsByJobId =
+    private static final Map<Long, List<BatchSkippedItem<?>>> skippedItemsByJobId =
             new ConcurrentHashMap<>();
 
     /**
-     * ThreadLocal to store current job execution ID for the current thread
+     * Get the current job execution ID from StepSynchronizationManager
      */
     private static @Nullable Long getJobExecutionId() {
         try {
             StepExecution stepExecution = Objects.requireNonNull(StepSynchronizationManager.getContext()).getStepExecution();
-            stepExecution.getJobExecution();
             return stepExecution.getJobExecution().getId();
         } catch (Exception e) {
             log.error("Failed to get jobExecutionId from StepSynchronizationManager: {}", e.getMessage());
@@ -43,18 +43,6 @@ public class BatchUtility {
         log.warn("JobExecutionId is null - cannot track skipped items");
         return null;
     }
-
-//    /**
-//     * Set the current job execution ID for this thread
-//     * Call this at the start of job execution
-//     *
-//     * @param jobExecutionId The job execution ID
-//     */
-//    public static void setCurrentJobExecutionId(Long jobExecutionId) {
-//        currentJobExecutionId.set(jobExecutionId);
-//        skippedItemsByJobId.putIfAbsent(jobExecutionId, new ArrayList<>());
-//        log.debug("Set job execution ID: {} for thread: {}", jobExecutionId, Thread.currentThread().getName());
-//    }
 
     /**
      * Get the current job execution ID for this thread
@@ -65,7 +53,6 @@ public class BatchUtility {
         return getJobExecutionId();
     }
 
-
     /**
      * Add a skipped item to the current job's list
      *
@@ -74,17 +61,13 @@ public class BatchUtility {
      * @param reason The reason for skipping
      */
     public static <T> void addSkippedItem(T item, String phase, String reason) {
-        Long jobExecutionId =getJobExecutionId();
+        Long jobExecutionId = getJobExecutionId();
         if (jobExecutionId == null) {
             log.warn("No job execution ID set for current thread. Skipped item will not be tracked.");
             return;
         }
 
-        BatchSkippedItem<Object> skippedItem = new BatchSkippedItem<>();
-        skippedItem.setItem(item);
-        skippedItem.setPhase(phase);
-        skippedItem.setReason(reason);
-
+        BatchSkippedItem<T> skippedItem = new BatchSkippedItem<>(item, phase, reason);
         skippedItemsByJobId.computeIfAbsent(jobExecutionId, k -> new ArrayList<>()).add(skippedItem);
 
         log.debug("Added skipped item to job {}: {} - {}", jobExecutionId, phase, reason);
@@ -98,40 +81,39 @@ public class BatchUtility {
      * @param errorMessage The detailed error message
      */
     public static <T> void addSkippedItemWithError(T item, String errorType, String errorMessage) {
-        Long jobExecutionId =getJobExecutionId();
+        Long jobExecutionId = getJobExecutionId();
         if (jobExecutionId == null) {
             log.warn("No job execution ID set for current thread. Skipped item will not be tracked.");
             return;
         }
 
-        BatchSkippedItem<Object> skippedItem = new BatchSkippedItem<>();
-        skippedItem.setItem(item);
-        skippedItem.setPhase(errorType);
-        skippedItem.setReason(errorMessage);
-
+        BatchSkippedItem<T> skippedItem = new BatchSkippedItem<>(item, errorType, errorMessage);
         skippedItemsByJobId.computeIfAbsent(jobExecutionId, k -> new ArrayList<>()).add(skippedItem);
+
+        log.debug("Added skipped item with error to job {}: {} - {}", jobExecutionId, errorType, errorMessage);
     }
 
     /**
      * Get a skipped item if it exists for the current job
      */
-    public static <T> @Nullable BatchSkippedItem<Object> getSkippedItem(T item, String phase, String reason) {
-        Long jobExecutionId =getJobExecutionId();
+    @SuppressWarnings("unchecked")
+    public static <T> @Nullable BatchSkippedItem<T> getSkippedItem(T item, String phase, String reason) {
+        Long jobExecutionId = getJobExecutionId();
         if (jobExecutionId == null) {
             return null;
         }
 
-        List<BatchSkippedItem<Object>> items = skippedItemsByJobId.get(jobExecutionId);
+        List<BatchSkippedItem<?>> items = skippedItemsByJobId.get(jobExecutionId);
         if (items == null) {
             return null;
         }
 
-        return items.stream()
+        return (BatchSkippedItem<T>) items.stream()
                 .filter(si -> {
-                    boolean itemMatches = (si.getItem() == null && item == null) ||
-                            (si.getItem() != null && si.getItem().equals(item));
-                    boolean phaseMatches = si.getPhase() != null && si.getPhase().equals(phase);
-                    return itemMatches && phaseMatches;
+                    boolean dtoMatches = Objects.equals(si.getItem(), item);
+                    boolean errorTypeMatches = Objects.equals(si.getPhase(), phase);
+                    boolean errorMessageMatches = Objects.equals(si.getReason(), reason);
+                    return dtoMatches && errorTypeMatches && errorMessageMatches;
                 })
                 .findFirst()
                 .orElse(null);
@@ -140,14 +122,15 @@ public class BatchUtility {
     /**
      * Get all skipped items for the current job
      */
+    @SuppressWarnings("unchecked")
     @Contract(" -> new")
-    public static @NotNull List<BatchSkippedItem<Object>> getSkippedItems() {
-        Long jobExecutionId =getJobExecutionId();
+    public static @NotNull List<BatchSkippedItem<?>> getSkippedItems() {
+        Long jobExecutionId = getJobExecutionId();
         if (jobExecutionId == null) {
             log.warn("No job execution ID set for current thread. Returning empty list.");
             return new ArrayList<>();
         }
-        return new ArrayList<>(skippedItemsByJobId.getOrDefault(jobExecutionId, new ArrayList<>()));
+        return skippedItemsByJobId.getOrDefault(jobExecutionId, new ArrayList<>());
     }
 
     /**
@@ -156,19 +139,20 @@ public class BatchUtility {
      * @param jobExecutionId The job execution ID
      * @return List of skipped items for that job
      */
+    @SuppressWarnings("unchecked")
     @Contract("_ -> new")
-    public static @NotNull List<BatchSkippedItem<Object>> getSkippedItems(Long jobExecutionId) {
+    public static @NotNull List<BatchSkippedItem<?>> getSkippedItems(Long jobExecutionId) {
         if (jobExecutionId == null) {
             return new ArrayList<>();
         }
-        return new ArrayList<>(skippedItemsByJobId.getOrDefault(jobExecutionId, new ArrayList<>()));
+        return  skippedItemsByJobId.getOrDefault(jobExecutionId, new ArrayList<>());
     }
 
     /**
      * Clear skipped items for the current job
      */
     public static void clearSkippedItems() {
-        Long jobExecutionId =getJobExecutionId();
+        Long jobExecutionId = getJobExecutionId();
         if (jobExecutionId != null) {
             skippedItemsByJobId.remove(jobExecutionId);
             log.debug("Cleared skipped items for job execution ID: {}", jobExecutionId);
@@ -191,11 +175,11 @@ public class BatchUtility {
      * Get count of skipped items for the current job
      */
     public static int getSkippedItemCount() {
-        Long jobExecutionId =getJobExecutionId();
+        Long jobExecutionId = getJobExecutionId();
         if (jobExecutionId == null) {
             return 0;
         }
-        List<BatchSkippedItem<Object>> items = skippedItemsByJobId.get(jobExecutionId);
+        List<BatchSkippedItem<?>> items = skippedItemsByJobId.get(jobExecutionId);
         return items != null ? items.size() : 0;
     }
 
@@ -209,15 +193,15 @@ public class BatchUtility {
         if (jobExecutionId == null) {
             return 0;
         }
-        List<BatchSkippedItem<Object>> items = skippedItemsByJobId.get(jobExecutionId);
+        List<BatchSkippedItem<?>> items = skippedItemsByJobId.get(jobExecutionId);
         return items != null ? items.size() : 0;
     }
 
     /**
      * Get skipped items by error type for the current job
      */
-    public static List<BatchSkippedItem<Object>> getSkippedItemsByType(String errorType) {
-        return getSkippedItems().stream()
+    public static  List<BatchSkippedItem<?>> getSkippedItemsByType(String errorType) {
+        return  getSkippedItems().stream()
                 .filter(item -> errorType.equals(item.getPhase()))
                 .toList();
     }
@@ -244,6 +228,7 @@ public class BatchUtility {
     public static @NotNull List<Long> getActiveJobExecutionIds() {
         return new ArrayList<>(skippedItemsByJobId.keySet());
     }
+
     /**
      * Save entities with fallback to individual saves on batch failure
      */
