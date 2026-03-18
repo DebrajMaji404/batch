@@ -47,6 +47,83 @@ public interface SimpleBatchProcessor<DTO, WRAPPER> {
     }
 
     // ========================================================================
+    // NEW: LIFECYCLE HOOKS
+    // ========================================================================
+
+    /**
+     * Optional: Pre-processing hook called before process()
+     * Use for data normalization, cleaning, or validation
+     *
+     * @param dto The input DTO
+     * @return Modified DTO or same DTO
+     */
+    default DTO preProcess(DTO dto) {
+        return dto;
+    }
+
+    /**
+     * Optional: Post-processing hook called after process()
+     * Use for additional transformations or enrichment
+     *
+     * @param wrapper The processed wrapper
+     * @return Modified wrapper or same wrapper
+     */
+    default WRAPPER postProcess(WRAPPER wrapper) {
+        return wrapper;
+    }
+
+    /**
+     * Optional: Conditional processing filter
+     * Return false to skip processing this item without error
+     *
+     * @param dto The input DTO
+     * @return true to process, false to skip
+     */
+    default boolean shouldProcess(DTO dto) {
+        return true;
+    }
+
+    /**
+     * Optional: Custom validation logic beyond Jakarta validation
+     * Return null or empty list if valid, otherwise return validation errors
+     *
+     * @param dto The input DTO
+     * @return List of validation error messages (empty if valid)
+     */
+    default List<String> customValidate(DTO dto) {
+        return List.of();
+    }
+
+    /**
+     * Optional: Called when job starts
+     * Use for initialization, setup, or logging
+     */
+    default void onJobStart() {
+        // Override to add custom logic
+    }
+
+    /**
+     * Optional: Called when job completes successfully
+     * Use for cleanup, reporting, or notifications
+     *
+     * @param itemsProcessed Total items processed
+     * @param itemsSkipped Total items skipped
+     */
+    default void onJobComplete(long itemsProcessed, long itemsSkipped) {
+        // Override to add custom logic
+    }
+
+    /**
+     * Optional: Called when job fails
+     * Use for error handling, alerts, or rollback
+     *
+     * @param error The exception that caused the failure
+     */
+    default void onJobFailure(Throwable error) {
+        // Override to add custom logic
+    }
+
+    // ========================================================================
     // HELPER METHODS FOR SAVE LOGIC
     // ========================================================================
 
@@ -106,6 +183,39 @@ public interface SimpleBatchProcessor<DTO, WRAPPER> {
                 .map(extractor)
                 .filter(Objects::nonNull)
                 .flatMap(List::stream)
+                .toList();
+
+        saveWithFallback(entities, repository);
+    }
+
+    /**
+     * Helper to conditionally save entities based on a predicate
+     *
+     * Example:
+     * <pre>
+     * {@code
+     * extractAndSaveIf(wrappers, MyWrapper::getEntity,
+     *                  entity -> entity.isValid(), entityRepository);
+     * }
+     * </pre>
+     *
+     * @param wrappers List of wrappers
+     * @param extractor Function to extract entity from wrapper
+     * @param predicate Condition to check before saving
+     * @param repository JPA repository to save entities
+     * @param <E> Entity type
+     */
+    default <E> void extractAndSaveIf(
+            List<WRAPPER> wrappers,
+            Function<WRAPPER, E> extractor,
+            java.util.function.Predicate<E> predicate,
+            JpaRepository<E, ?> repository) {
+
+        List<E> entities = wrappers.stream()
+                .filter(Objects::nonNull)
+                .map(extractor)
+                .filter(Objects::nonNull)
+                .filter(predicate)
                 .toList();
 
         saveWithFallback(entities, repository);

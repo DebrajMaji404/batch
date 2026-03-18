@@ -3,11 +3,13 @@ package com.eazy.batch.reader;
 import com.eazy.batch.annotation.ExcelDateFormat;
 import com.eazy.batch.exception.InvalidTemplateException;
 import com.poiji.annotation.ExcelCellName;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
 import org.apache.poi.ss.usermodel.*;
 import org.jetbrains.annotations.NotNull;
 import org.springframework.batch.item.ItemReader;
 import org.springframework.batch.item.file.FlatFileParseException;
+import org.springframework.beans.factory.DisposableBean;
 import org.springframework.core.io.Resource;
 
 import java.io.File;
@@ -19,12 +21,17 @@ import java.util.*;
 
 /**
  * Row-by-row Excel reader that properly handles skippable exceptions
+ * FIXED: Resource leak - now implements DisposableBean
+ * FIXED: Empty workbook handling
  */
-public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T> {
+@Slf4j
+public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, DisposableBean {
     private final File file;
     private final Class<T> type;
     private final String datePattern;
     private final Map<String, Field> fieldMap;
+    private final int sheetIndex;
+    private final String sheetName;
 
     private Workbook workbook;
     private Sheet sheet;
@@ -32,9 +39,16 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T> {
     private boolean initialized = false;
 
     public ExcelItemReaderWithHeaderValidation(@NotNull Resource resource, Class<T> type) {
+        this(resource, type, 0, null);
+    }
+
+    public ExcelItemReaderWithHeaderValidation(@NotNull Resource resource, Class<T> type,
+                                               int sheetIndex, String sheetName) {
         try {
             this.file = resource.getFile();
             this.type = type;
+            this.sheetIndex = sheetIndex;
+            this.sheetName = sheetName;
             this.datePattern = detectDatePattern(type);
             this.fieldMap = buildFieldMap(type);
 
@@ -50,9 +64,35 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T> {
         if (!initialized) {
             try {
                 this.workbook = WorkbookFactory.create(file);
-                this.sheet = workbook.getSheetAt(0);
+
+                // FIXED: Check if workbook has sheets
+                if (workbook.getNumberOfSheets() == 0) {
+                    throw new InvalidTemplateException("Excel file has no sheets");
+                }
+
+                // Get sheet by name or index
+                if (sheetName != null && !sheetName.isEmpty()) {
+                    this.sheet = workbook.getSheet(sheetName);
+                    if (this.sheet == null) {
+                        throw new InvalidTemplateException(
+                                "Sheet '" + sheetName + "' not found in workbook"
+                        );
+                    }
+                } else {
+                    if (sheetIndex >= workbook.getNumberOfSheets()) {
+                        throw new InvalidTemplateException(
+                                "Sheet index " + sheetIndex + " out of bounds. " +
+                                        "Workbook has " + workbook.getNumberOfSheets() + " sheets"
+                        );
+                    }
+                    this.sheet = workbook.getSheetAt(sheetIndex);
+                }
+
                 this.initialized = true;
+                log.info("Excel reader initialized: {} rows to process",
+                        sheet.getLastRowNum());
             } catch (Exception e) {
+                closeWorkbook();
                 throw new RuntimeException("Failed to open Excel file", e);
             }
         }
@@ -60,34 +100,47 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T> {
 
     @Override
     public T read() {
-        lazyInitialize();
-
-        if (currentRowIndex > sheet.getLastRowNum()) {
-            // Close workbook when done
-            closeWorkbook();
-            return null;
-        }
-
-        Row row = sheet.getRow(currentRowIndex);
-        int rowNum = currentRowIndex;
-        currentRowIndex++;
-
-        if (row == null) {
-            // Skip empty rows
-            return read();
-        }
-
         try {
+            lazyInitialize();
+
+            if (currentRowIndex > sheet.getLastRowNum()) {
+                // Close workbook when done
+                closeWorkbook();
+                return null;
+            }
+
+            Row row = sheet.getRow(currentRowIndex);
+            int rowNum = currentRowIndex;
+            currentRowIndex++;
+
+            if (row == null || isEmptyRow(row)) {
+                // Skip empty rows
+                log.debug("Skipping empty row at index {}", rowNum);
+                return read();
+            }
+
             return parseRow(row, rowNum);
         } catch (Exception e) {
             // Wrap in FlatFileParseException so Spring Batch can handle it
             throw new FlatFileParseException(
-                    "Error parsing row " + rowNum + ": " + e.getMessage(),
+                    "Error parsing row " + currentRowIndex + ": " + e.getMessage(),
                     e,
                     "",
-                    rowNum
+                    currentRowIndex
             );
         }
+    }
+
+    private boolean isEmptyRow(Row row) {
+        for (Cell cell : row) {
+            if (cell != null && cell.getCellType() != CellType.BLANK) {
+                String value = getCellStringValue(cell);
+                if (value != null && !value.trim().isEmpty()) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private T parseRow(Row row, int rowNum) throws Exception {
@@ -141,17 +194,27 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T> {
             } else if (fieldType == Boolean.class || fieldType == boolean.class) {
                 return Boolean.valueOf(stringValue.trim());
             } else if (fieldType == LocalDate.class) {
-                return LocalDate.parse(stringValue.trim(), DateTimeFormatter.ofPattern(datePattern));
+                // Check for custom date format on field
+                String pattern = datePattern;
+                if (field.isAnnotationPresent(ExcelDateFormat.class)) {
+                    pattern = field.getAnnotation(ExcelDateFormat.class).pattern();
+                }
+                return LocalDate.parse(stringValue.trim(),
+                        DateTimeFormatter.ofPattern(pattern));
             } else if (fieldType.isEnum()) {
                 return parseEnum(fieldType, stringValue.trim(), rowNum, columnIndex);
             }
 
             return stringValue;
         } catch (Exception e) {
+            String headerName = sheet.getRow(0).getCell(columnIndex).getStringCellValue();
             throw new RuntimeException(
-                    "Failed to parse value '" + stringValue + "' for field '" +
-                            field.getName() + "' at row " + rowNum + ", column " + columnIndex +
-                            ": " + e.getMessage(),
+                    String.format(
+                            "Failed to parse value '%s' for field '%s' (column '%s') " +
+                                    "at row %d, column %d: %s",
+                            stringValue, field.getName(), headerName,
+                            rowNum, columnIndex, e.getMessage()
+                    ),
                     e
             );
         }
@@ -165,7 +228,12 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T> {
                     yield cell.getLocalDateTimeCellValue().toLocalDate()
                             .format(DateTimeFormatter.ofPattern(datePattern));
                 }
-                yield String.valueOf((long) cell.getNumericCellValue());
+                double numericValue = cell.getNumericCellValue();
+                // Check if it's a whole number
+                if (numericValue == Math.floor(numericValue)) {
+                    yield String.valueOf((long) numericValue);
+                }
+                yield String.valueOf(numericValue);
             }
             case BOOLEAN -> String.valueOf(cell.getBooleanCellValue());
             case FORMULA -> cell.getCellFormula();
@@ -202,8 +270,12 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T> {
         }
 
         throw new IllegalArgumentException(
-                "Cannot convert '" + value + "' to enum " + enumType.getSimpleName() +
-                        " at row " + rowNum + ", column " + columnIndex
+                String.format(
+                        "Cannot convert '%s' to enum %s at row %d, column %d. " +
+                                "Valid values: %s",
+                        value, enumType.getSimpleName(), rowNum, columnIndex,
+                        Arrays.toString(enumType.getEnumConstants())
+                )
         );
     }
 
@@ -220,16 +292,43 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T> {
 
     private void validateHeaders(File file, Class<T> type) throws IOException, InvalidFormatException {
         try (Workbook workbook = WorkbookFactory.create(file)) {
-            Sheet sheet = workbook.getSheetAt(0);
+            // FIXED: Check if workbook has sheets
+            if (workbook.getNumberOfSheets() == 0) {
+                throw new InvalidTemplateException("Excel file has no sheets");
+            }
+
+            Sheet sheet;
+            if (sheetName != null && !sheetName.isEmpty()) {
+                sheet = workbook.getSheet(sheetName);
+                if (sheet == null) {
+                    throw new InvalidTemplateException(
+                            "Sheet '" + sheetName + "' not found in workbook"
+                    );
+                }
+            } else {
+                if (sheetIndex >= workbook.getNumberOfSheets()) {
+                    throw new InvalidTemplateException(
+                            "Sheet index " + sheetIndex + " out of bounds"
+                    );
+                }
+                sheet = workbook.getSheetAt(sheetIndex);
+            }
+
             Row headerRow = sheet.getRow(0);
 
             if (headerRow == null) {
-                throw new InvalidTemplateException("Excel file does not contain a header row.");
+                throw new InvalidTemplateException(
+                        "Excel file does not contain a header row in sheet: " +
+                                (sheetName != null ? sheetName : "index " + sheetIndex)
+                );
             }
 
             List<String> excelHeaders = new ArrayList<>();
             for (Cell cell : headerRow) {
-                excelHeaders.add(cell.getStringCellValue());
+                String header = cell.getStringCellValue();
+                if (header != null && !header.trim().isEmpty()) {
+                    excelHeaders.add(header.trim());
+                }
             }
 
             List<String> expectedHeaders = getExpectedHeaders(type);
@@ -251,6 +350,9 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T> {
                 }
                 throw new InvalidTemplateException(errorMsg.toString().trim());
             }
+
+            log.info("✅ Excel headers validated successfully for sheet: {}",
+                    sheetName != null ? sheetName : "index " + sheetIndex);
         }
     }
 
@@ -279,9 +381,21 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T> {
         if (workbook != null) {
             try {
                 workbook.close();
+                log.debug("Workbook closed successfully");
             } catch (IOException e) {
-                // Log but don't throw
+                log.warn("Failed to close workbook: {}", e.getMessage());
+            } finally {
+                workbook = null;
+                initialized = false;
             }
         }
+    }
+
+    /**
+     * FIXED: Implement DisposableBean to ensure resource cleanup
+     */
+    @Override
+    public void destroy() {
+        closeWorkbook();
     }
 }

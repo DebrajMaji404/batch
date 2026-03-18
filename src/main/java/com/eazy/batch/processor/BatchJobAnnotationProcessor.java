@@ -1,6 +1,9 @@
 package com.eazy.batch.processor;
 
 import com.eazy.batch.annotation.BatchJob;
+import com.eazy.batch.enums.FileType;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import javax.annotation.processing.AbstractProcessor;
 import javax.annotation.processing.RoundEnvironment;
@@ -18,84 +21,93 @@ import java.io.PrintWriter;
 import java.util.Set;
 
 /**
- * Enterprise-grade annotation processor that generates Spring Batch configuration classes
- * at compile time to eliminate boilerplate and ensure consistency across batch jobs.
+ * Annotation processor that auto-generates Spring Batch configuration classes at compile time.
  *
- * <p>This processor generates the following components for each {@link BatchJob} annotated class:
- * <ul>
- *   <li>Job Configuration with proper dependency injection</li>
- *   <li>ItemReader with step scope and header validation</li>
- *   <li>ItemProcessor with Jakarta validation</li>
- *   <li>ItemWriter with null-safe chunk processing</li>
- *   <li>SkipListener with comprehensive error tracking</li>
- * </ul>
+ * When you annotate a class with @BatchJob, this processor automatically creates 5 classes:
+ * 1. Configuration - Job and Step beans
+ * 2. Reader - Excel/CSV file reader with header validation
+ * 3. Processor - Item processor with validation hooks
+ * 4. Writer - Item writer that delegates to your save method
+ * 5. SkipListener - Error tracking and logging
  *
- * @author Generated Code
- * @version 2.1
- * @since 1.0
+ * This eliminates 500+ lines of boilerplate Spring Batch code per job.
+ *
+ * @version 3.0
+ * @author EazyBatch Framework
  */
 @SupportedAnnotationTypes("com.eazy.batch.annotation.BatchJob")
 @SupportedSourceVersion(SourceVersion.RELEASE_21)
 public class BatchJobAnnotationProcessor extends AbstractProcessor {
 
     private static final String INDENT = "    ";
-    private static final String BEAN_SUFFIX_READER = "ItemReader";
-    private static final String BEAN_SUFFIX_PROCESSOR = "ItemProcessor";
-    private static final String BEAN_SUFFIX_WRITER = "ItemWriter";
-    private static final String BEAN_SUFFIX_SKIP_LISTENER = "SkipListener";
+    private static final String DOUBLE_INDENT = INDENT + INDENT;
+    private static final String TRIPLE_INDENT = INDENT + INDENT + INDENT;
+    private static final String QUAD_INDENT = INDENT + INDENT + INDENT + INDENT;
 
     @Override
-    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+    public boolean process(Set<? extends TypeElement> annotations, @NotNull RoundEnvironment roundEnv) {
         for (Element element : roundEnv.getElementsAnnotatedWith(BatchJob.class)) {
             if (element instanceof TypeElement typeElement) {
                 try {
                     generateBatchComponents(typeElement);
-                    logInfo("Successfully generated batch configuration for: " + typeElement.getSimpleName());
+                    logInfo("✅ Successfully generated batch configuration for: " + typeElement.getSimpleName());
                 } catch (IOException e) {
-                    logError("Failed to generate batch configuration: " + e.getMessage(), element);
+                    logError("❌ Failed to generate batch configuration: " + e.getMessage(), element);
                 }
             }
         }
         return true;
     }
 
-    private void generateBatchComponents(TypeElement element) throws IOException {
+    private void generateBatchComponents(@NotNull TypeElement element) throws IOException {
         BatchJob annotation = element.getAnnotation(BatchJob.class);
         String packageName = processingEnv.getElementUtils().getPackageOf(element).toString();
         String className = element.getSimpleName().toString();
 
+        // Extract annotation parameters
         String jobName = annotation.jobName();
         String stepName = annotation.stepName();
+        int chunkSize = annotation.chunkSize();
+        int skipLimit = annotation.skipLimit();
+        FileType fileType = annotation.fileType();
+        String sheetName = annotation.sheetName();
+        int sheetIndex = annotation.sheetIndex();
+        boolean dryRun = annotation.dryRun();
+        boolean enableRetry = annotation.enableRetry();
+        int retryLimit = annotation.retryLimit();
+        String[] retryableExceptions = annotation.retryableExceptions();
 
-        // Extract class information
+        // Extract class names
         String dtoClassFqn = getClassFqn(annotation, "dtoClass");
         String wrapperClassFqn = getClassFqn(annotation, "wrapperClass");
         String dtoClassName = getSimpleName(dtoClassFqn);
         String wrapperClassName = getSimpleName(wrapperClassFqn);
 
-        // Generate all components with consistent bean naming
-        generateJobConfiguration(packageName, className, jobName, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn);
-        generateReader(packageName, className, stepName, dtoClassName, dtoClassFqn);
-        generateProcessor(packageName, className, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn);
-        generateWriter(packageName, className, stepName, wrapperClassName, wrapperClassFqn);
+        // Validate and generate
+        validateConfiguration(jobName, stepName, dtoClassName, wrapperClassName, chunkSize, skipLimit);
+        generateJobConfiguration(packageName, className, jobName, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn, chunkSize, skipLimit, enableRetry, retryLimit, retryableExceptions);
+        generateReader(packageName, className, stepName, dtoClassName, dtoClassFqn, fileType, sheetName, sheetIndex);
+        generateProcessor(packageName, className, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn, dryRun);
+        generateWriter(packageName, className, stepName, wrapperClassName, wrapperClassFqn, dryRun);
         generateSkipListener(packageName, className, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn);
     }
 
-    private void generateJobConfiguration(String packageName, String className, String jobName, String stepName,
-                                          String dtoClassName, String wrapperClassName,
-                                          String dtoClassFqn, String wrapperClassFqn) throws IOException {
+    private void validateConfiguration(String jobName, String stepName, String dtoClassName, String wrapperClassName, int chunkSize, int skipLimit) {
+        if (jobName == null || jobName.trim().isEmpty()) throw new IllegalArgumentException("jobName cannot be empty");
+        if (stepName == null || stepName.trim().isEmpty()) throw new IllegalArgumentException("stepName cannot be empty");
+        if (chunkSize <= 0) throw new IllegalArgumentException("chunkSize must be positive");
+        if (skipLimit < 0) throw new IllegalArgumentException("skipLimit cannot be negative");
+    }
+
+    private void generateJobConfiguration(String packageName, String className, String jobName, String stepName, String dtoClassName, String wrapperClassName, String dtoClassFqn, String wrapperClassFqn, int chunkSize, int skipLimit, boolean enableRetry, int retryLimit, String[] retryableExceptions) throws IOException {
         String generatedClassName = className + "Configuration";
         JavaFileObject file = processingEnv.getFiler().createSourceFile(packageName + "." + generatedClassName);
 
         try (PrintWriter out = new PrintWriter(file.openWriter())) {
-            // Package and imports
             out.println("package " + packageName + ";");
             out.println();
             out.println("import " + dtoClassFqn + ";");
             out.println("import " + wrapperClassFqn + ";");
-            out.println("import com.eazy.batch.autoconfigure.BatchProcessorProperties;");
-            out.println("import com.eazy.batch.listener.JobCompletionListener;");
-            out.println("import com.eazy.batch.constant.AppConstant;");
             out.println("import lombok.RequiredArgsConstructor;");
             out.println("import lombok.extern.slf4j.Slf4j;");
             out.println("import org.springframework.batch.core.Job;");
@@ -110,103 +122,72 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import org.springframework.batch.item.ItemWriter;");
             out.println("import org.springframework.context.annotation.Bean;");
             out.println("import org.springframework.context.annotation.Configuration;");
-            out.println("import org.springframework.context.annotation.Configuration;");
             out.println("import org.springframework.transaction.PlatformTransactionManager;");
             out.println();
-
-            // JavaDoc
             out.println("/**");
-            out.println(" * Spring Batch Job Configuration for " + className);
-            out.println(" * <p>This class is auto-generated by {@link BatchJobAnnotationProcessor}.</p>");
-            out.println(" * <p><b>DO NOT MODIFY</b> - Any changes will be overwritten on next compilation.</p>");
-            out.println(" * ");
-            out.println(" * <p>Configuration includes:");
-            out.println(" * <ul>");
-            out.println(" *   <li>Job: " + jobName + "</li>");
-            out.println(" *   <li>Step: " + stepName + "</li>");
-            out.println(" *   <li>Chunk-based processing with fault tolerance</li>");
-            out.println(" *   <li>Skip handling with comprehensive logging</li>");
-            out.println(" * </ul>");
-            out.println(" * ");
-            out.println(" * @see " + className);
-            out.println(" * @generated " + getClass().getName());
+            out.println(" * Auto-generated Spring Batch configuration for " + className);
+            out.println(" * DO NOT MODIFY - Changes will be overwritten on recompilation");
+            out.println(" * @generated by " + getClass().getName());
             out.println(" */");
             out.println("@Slf4j");
             out.println("@Configuration");
             out.println("@RequiredArgsConstructor");
             out.println("public class " + generatedClassName + " {");
             out.println();
-
-            // Fields
             out.println(INDENT + "private final JobRepository jobRepository;");
             out.println(INDENT + "private final PlatformTransactionManager transactionManager;");
-            out.println(INDENT + "private final JobCompletionListener jobCompletionListener;");
-            out.println(INDENT + "private final BatchProcessorProperties properties;");
             out.println();
-
-            // Job Bean
-            out.println(INDENT + "/**");
-            out.println(INDENT + " * Defines the batch job with automatic run ID incrementer and completion listener.");
-            out.println(INDENT + " * ");
-            out.println(INDENT + " * @param " + stepName + " the step to execute");
-            out.println(INDENT + " * @return configured Job instance");
-            out.println(INDENT + " */");
             out.println(INDENT + "@Bean");
             out.println(INDENT + "public Job " + jobName + "(Step " + stepName + ") {");
-            out.println(INDENT + INDENT + "log.info(\"Initializing batch job: {}\", \"" + jobName + "\");");
-            out.println(INDENT + INDENT + "return new JobBuilder(\"" + jobName + "\", jobRepository)");
-            out.println(INDENT + INDENT + INDENT + INDENT + ".incrementer(new RunIdIncrementer())");
-            out.println(INDENT + INDENT + INDENT + INDENT + ".start(" + stepName + ")");
-            out.println(INDENT + INDENT + INDENT + INDENT + ".listener(jobCompletionListener)");
-            out.println(INDENT + INDENT + INDENT + INDENT + ".build();");
+            out.println(DOUBLE_INDENT + "log.info(\"Initializing batch job: {}\", \"" + jobName + "\");");
+            out.println(DOUBLE_INDENT + "return new JobBuilder(\"" + jobName + "\", jobRepository)");
+            out.println(QUAD_INDENT + ".incrementer(new RunIdIncrementer())");
+            out.println(QUAD_INDENT + ".start(" + stepName + ")");
+            out.println(QUAD_INDENT + ".build();");
             out.println(INDENT + "}");
             out.println();
-
-            // Step Bean - FIXED: Removed @Qualifier annotations
-            out.println(INDENT + "/**");
-            out.println(INDENT + " * Defines the batch step with chunk-oriented processing and fault tolerance.");
-            out.println(INDENT + " * <p>Uses type-based dependency injection for proper skip listener registration.</p>");
-            out.println(INDENT + " * ");
-            out.println(INDENT + " * @param reader the item reader");
-            out.println(INDENT + " * @param processor the item processor");
-            out.println(INDENT + " * @param writer the item writer");
-            out.println(INDENT + " * @param skipListener the skip listener for error handling");
-            out.println(INDENT + " * @return configured Step instance");
-            out.println(INDENT + " */");
             out.println(INDENT + "@Bean");
             out.println(INDENT + "public Step " + stepName + "(");
-            out.println(INDENT + INDENT + INDENT + "ItemReader<" + dtoClassName + "> reader,");
-            out.println(INDENT + INDENT + INDENT + "ItemProcessor<" + dtoClassName + ", " + wrapperClassName + "> processor,");
-            out.println(INDENT + INDENT + INDENT + "ItemWriter<" + wrapperClassName + "> writer,");
-            out.println(INDENT + INDENT + INDENT + "SkipListener<" + dtoClassName + ", " + wrapperClassName + "> skipListener");
-            out.println(INDENT + ") {");
-            out.println(INDENT + INDENT + "log.info(\"Initializing batch step: {}\", \"" + stepName + "\");");
-            out.println(INDENT + INDENT + "return new StepBuilder(\"" + stepName + "\", jobRepository)");
-            out.println(INDENT + INDENT + INDENT + INDENT + ".<" + dtoClassName + ", " + wrapperClassName + ">chunk(properties.getDefaultChunkSize(), transactionManager)");
-            out.println(INDENT + INDENT + INDENT + INDENT + ".reader(reader)");
-            out.println(INDENT + INDENT + INDENT + INDENT + ".processor(processor)");
-            out.println(INDENT + INDENT + INDENT + INDENT + ".writer(writer)");
-            out.println(INDENT + INDENT + INDENT + INDENT + ".faultTolerant()");
-            out.println(INDENT + INDENT + INDENT + INDENT + ".skipLimit(properties.getDefaultSkipLimit())");
-            out.println(INDENT + INDENT + INDENT + INDENT + ".skip(Exception.class)");
-            out.println(INDENT + INDENT + INDENT + INDENT + ".noRollback(Exception.class)");
-            out.println(INDENT + INDENT + INDENT + INDENT + ".listener(skipListener)");
-            out.println(INDENT + INDENT + INDENT + INDENT + ".build();");
+            out.println(TRIPLE_INDENT + "ItemReader<" + dtoClassName + "> reader,");
+            out.println(TRIPLE_INDENT + "ItemProcessor<" + dtoClassName + ", " + wrapperClassName + "> processor,");
+            out.println(TRIPLE_INDENT + "ItemWriter<" + wrapperClassName + "> writer,");
+            out.println(TRIPLE_INDENT + "SkipListener<" + dtoClassName + ", " + wrapperClassName + "> skipListener) {");
+            out.println(DOUBLE_INDENT + "log.info(\"Initializing batch step: {}\", \"" + stepName + "\");");
+            out.println(DOUBLE_INDENT + "var stepBuilder = new StepBuilder(\"" + stepName + "\", jobRepository)");
+            out.println(QUAD_INDENT + ".<" + dtoClassName + ", " + wrapperClassName + ">chunk(" + chunkSize + ", transactionManager)");
+            out.println(QUAD_INDENT + ".reader(reader)");
+            out.println(QUAD_INDENT + ".processor(processor)");
+            out.println(QUAD_INDENT + ".writer(writer)");
+            out.println(QUAD_INDENT + ".faultTolerant()");
+            out.println(QUAD_INDENT + ".skipLimit(" + skipLimit + ")");
+            out.println(QUAD_INDENT + ".skip(Exception.class)");
+            out.println(QUAD_INDENT + ".noRollback(Exception.class)");
+            out.println(QUAD_INDENT + ".listener(skipListener)");
+            if (enableRetry && retryableExceptions.length > 0) {
+                out.println(QUAD_INDENT + ".retryLimit(" + retryLimit + ")");
+                for (String exception : retryableExceptions) {
+                    out.println(QUAD_INDENT + ".retry(" + exception + ".class)");
+                }
+            }
+            out.println(QUAD_INDENT + ";");
+            out.println(DOUBLE_INDENT + "return stepBuilder.build();");
             out.println(INDENT + "}");
             out.println("}");
         }
     }
 
-    private void generateReader(String packageName, String className, String stepName,
-                                String dtoClassName, String dtoClassFqn) throws IOException {
+    private void generateReader(String packageName, String className, String stepName, String dtoClassName, String dtoClassFqn, FileType fileType, String sheetName, int sheetIndex) throws IOException {
         String generatedClassName = className + "Reader";
-        String beanName = stepName + BEAN_SUFFIX_READER;
         JavaFileObject file = processingEnv.getFiler().createSourceFile(packageName + "." + generatedClassName);
 
         try (PrintWriter out = new PrintWriter(file.openWriter())) {
             out.println("package " + packageName + ";");
             out.println();
-            out.println("import com.eazy.batch.reader.ExcelItemReaderWithHeaderValidation;");
+            if (fileType == FileType.CSV) {
+                out.println("import com.eazy.batch.reader.CSVItemReader;");
+            } else {
+                out.println("import com.eazy.batch.reader.ExcelItemReaderWithHeaderValidation;");
+            }
             out.println("import " + dtoClassFqn + ";");
             out.println("import lombok.extern.slf4j.Slf4j;");
             out.println("import org.springframework.batch.core.configuration.annotation.StepScope;");
@@ -216,45 +197,28 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import org.springframework.context.annotation.Configuration;");
             out.println("import org.springframework.core.io.FileSystemResource;");
             out.println();
-
-            out.println("/**");
-            out.println(" * Excel Item Reader for " + className);
-            out.println(" * <p>Reads and validates Excel file headers before processing.</p>");
-            out.println(" * <p><b>DO NOT MODIFY</b> - Auto-generated by {@link BatchJobAnnotationProcessor}.</p>");
-            out.println(" * ");
-            out.println(" * @see " + className);
-            out.println(" * @generated " + getClass().getName());
-            out.println(" */");
             out.println("@Slf4j");
             out.println("@Configuration");
             out.println("public class " + generatedClassName + " {");
             out.println();
-
-            out.println(INDENT + "/**");
-            out.println(INDENT + " * Creates a step-scoped Excel item reader with header validation.");
-            out.println(INDENT + " * ");
-            out.println(INDENT + " * @param filePath the path to the Excel file (from job parameters)");
-            out.println(INDENT + " * @return configured ItemReader instance");
-            out.println(INDENT + " */");
             out.println(INDENT + "@Bean");
             out.println(INDENT + "@StepScope");
-            out.println(INDENT + "public ItemReader<" + dtoClassName + "> " + beanName + "(");
-            out.println(INDENT + INDENT + INDENT + "@Value(\"#{jobParameters['filePath']}\") String filePath) {");
-            out.println(INDENT + INDENT + "log.debug(\"Initializing Excel reader for file: {}\", filePath);");
-            out.println(INDENT + INDENT + "return new ExcelItemReaderWithHeaderValidation<>(");
-            out.println(INDENT + INDENT + INDENT + INDENT + "new FileSystemResource(filePath),");
-            out.println(INDENT + INDENT + INDENT + INDENT + dtoClassName + ".class");
-            out.println(INDENT + INDENT + ");");
+            out.println(INDENT + "public ItemReader<" + dtoClassName + "> " + stepName + "ItemReader(");
+            out.println(TRIPLE_INDENT + "@Value(\"#{jobParameters['filePath']}\") String filePath) {");
+            out.println(DOUBLE_INDENT + "log.debug(\"Initializing " + fileType + " reader for file: {}\", filePath);");
+            if (fileType == FileType.CSV) {
+                out.println(DOUBLE_INDENT + "return new CSVItemReader<>(new FileSystemResource(filePath), " + dtoClassName + ".class);");
+            } else {
+                out.println(DOUBLE_INDENT + "return new ExcelItemReaderWithHeaderValidation<>(");
+                out.println(QUAD_INDENT + "new FileSystemResource(filePath), " + dtoClassName + ".class, " + sheetIndex + ", " + (sheetName.isEmpty() ? "null" : "\"" + sheetName + "\"") + ");");
+            }
             out.println(INDENT + "}");
             out.println("}");
         }
     }
 
-    private void generateProcessor(String packageName, String className, String stepName,
-                                   String dtoClassName, String wrapperClassName,
-                                   String dtoClassFqn, String wrapperClassFqn) throws IOException {
+    private void generateProcessor(String packageName, String className, String stepName, String dtoClassName, String wrapperClassName, String dtoClassFqn, String wrapperClassFqn, boolean dryRun) throws IOException {
         String generatedClassName = className + "Processor";
-        String beanName = stepName + BEAN_SUFFIX_PROCESSOR;
         JavaFileObject file = processingEnv.getFiler().createSourceFile(packageName + "." + generatedClassName);
 
         try (PrintWriter out = new PrintWriter(file.openWriter())) {
@@ -269,64 +233,47 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import org.springframework.batch.item.ItemProcessor;");
             out.println("import org.springframework.context.annotation.Bean;");
             out.println("import org.springframework.context.annotation.Configuration;");
-            out.println();
+            out.println("import java.util.List;");
             out.println("import java.util.Set;");
             out.println("import java.util.stream.Collectors;");
             out.println();
-
-            out.println("/**");
-            out.println(" * Item Processor for " + className);
-            out.println(" * <p>Validates DTOs using Jakarta Bean Validation before delegating to business logic.</p>");
-            out.println(" * <p><b>DO NOT MODIFY</b> - Auto-generated by {@link BatchJobAnnotationProcessor}.</p>");
-            out.println(" * ");
-            out.println(" * @see " + className);
-            out.println(" * @generated " + getClass().getName());
-            out.println(" */");
             out.println("@Slf4j");
             out.println("@Configuration");
             out.println("@RequiredArgsConstructor");
             out.println("public class " + generatedClassName + " {");
             out.println();
-
             out.println(INDENT + "private final " + className + " delegate;");
             out.println(INDENT + "private final Validator validator;");
             out.println();
-
-            out.println(INDENT + "/**");
-            out.println(INDENT + " * Creates an item processor with Jakarta Bean Validation.");
-            out.println(INDENT + " * ");
-            out.println(INDENT + " * @return configured ItemProcessor instance");
-            out.println(INDENT + " */");
             out.println(INDENT + "@Bean");
-            out.println(INDENT + "public ItemProcessor<" + dtoClassName + ", " + wrapperClassName + "> " + beanName + "() {");
-            out.println(INDENT + INDENT + "return dto -> {");
-            out.println(INDENT + INDENT + INDENT + "if (dto == null) {");
-            out.println(INDENT + INDENT + INDENT + INDENT + "log.warn(\"Received null DTO in processor\");");
-            out.println(INDENT + INDENT + INDENT + INDENT + "return null;");
-            out.println(INDENT + INDENT + INDENT + "}");
-            out.println();
-            out.println(INDENT + INDENT + INDENT + "// Validate DTO");
-            out.println(INDENT + INDENT + INDENT + "Set<ConstraintViolation<" + dtoClassName + ">> violations = validator.validate(dto);");
-            out.println(INDENT + INDENT + INDENT + "if (!violations.isEmpty()) {");
-            out.println(INDENT + INDENT + INDENT + INDENT + "String errors = violations.stream()");
-            out.println(INDENT + INDENT + INDENT + INDENT + INDENT + INDENT + ".map(v -> v.getPropertyPath() + \": \" + v.getMessage())");
-            out.println(INDENT + INDENT + INDENT + INDENT + INDENT + INDENT + ".collect(Collectors.joining(\", \"));");
-            out.println(INDENT + INDENT + INDENT + INDENT + "log.error(\"Validation failed for DTO: {}\", errors);");
-            out.println(INDENT + INDENT + INDENT + INDENT + "throw new RuntimeException(\"Validation failed: \" + errors);");
-            out.println(INDENT + INDENT + INDENT + "}");
-            out.println();
-            out.println(INDENT + INDENT + INDENT + "// Delegate to business logic");
-            out.println(INDENT + INDENT + INDENT + "return delegate.process(dto);");
-            out.println(INDENT + INDENT + "};");
+            out.println(INDENT + "public ItemProcessor<" + dtoClassName + ", " + wrapperClassName + "> " + stepName + "ItemProcessor() {");
+            out.println(DOUBLE_INDENT + "return dto -> {");
+            out.println(TRIPLE_INDENT + "if (dto == null) { log.warn(\"Received null DTO\"); return null; }");
+            out.println(TRIPLE_INDENT + "dto = delegate.preProcess(dto);");
+            out.println(TRIPLE_INDENT + "if (!delegate.shouldProcess(dto)) { log.debug(\"Item filtered: {}\", delegate.getIdentifier(dto)); return null; }");
+            out.println(TRIPLE_INDENT + "Set<ConstraintViolation<" + dtoClassName + ">> violations = validator.validate(dto);");
+            out.println(TRIPLE_INDENT + "if (!violations.isEmpty()) {");
+            out.println(QUAD_INDENT + "String errors = violations.stream().map(v -> v.getPropertyPath() + \": \" + v.getMessage()).collect(Collectors.joining(\", \"));");
+            out.println(QUAD_INDENT + "throw new RuntimeException(\"Validation failed: \" + errors);");
+            out.println(TRIPLE_INDENT + "}");
+            out.println(TRIPLE_INDENT + "List<String> customErrors = delegate.customValidate(dto);");
+            out.println(TRIPLE_INDENT + "if (customErrors != null && !customErrors.isEmpty()) {");
+            out.println(QUAD_INDENT + "throw new RuntimeException(\"Custom validation failed: \" + String.join(\", \", customErrors));");
+            out.println(TRIPLE_INDENT + "}");
+            if (dryRun) {
+                out.println(TRIPLE_INDENT + "log.debug(\"[DRY RUN] Would process: {}\", delegate.getIdentifier(dto)); return null;");
+            } else {
+                out.println(TRIPLE_INDENT + "var result = delegate.process(dto);");
+                out.println(TRIPLE_INDENT + "return result != null ? delegate.postProcess(result) : null;");
+            }
+            out.println(DOUBLE_INDENT + "};");
             out.println(INDENT + "}");
             out.println("}");
         }
     }
 
-    private void generateWriter(String packageName, String className, String stepName,
-                                String wrapperClassName, String wrapperClassFqn) throws IOException {
+    private void generateWriter(String packageName, String className, String stepName, String wrapperClassName, String wrapperClassFqn, boolean dryRun) throws IOException {
         String generatedClassName = className + "Writer";
-        String beanName = stepName + BEAN_SUFFIX_WRITER;
         JavaFileObject file = processingEnv.getFiler().createSourceFile(packageName + "." + generatedClassName);
 
         try (PrintWriter out = new PrintWriter(file.openWriter())) {
@@ -339,57 +286,34 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import org.springframework.batch.item.ItemWriter;");
             out.println("import org.springframework.context.annotation.Bean;");
             out.println("import org.springframework.context.annotation.Configuration;");
-            out.println();
             out.println("import java.util.List;");
             out.println("import java.util.Objects;");
             out.println("import java.util.stream.Collectors;");
             out.println();
-
-            out.println("/**");
-            out.println(" * Item Writer for " + className);
-            out.println(" * <p>Filters null items and delegates to persistence logic.</p>");
-            out.println(" * <p><b>DO NOT MODIFY</b> - Auto-generated by {@link BatchJobAnnotationProcessor}.</p>");
-            out.println(" * ");
-            out.println(" * @see " + className);
-            out.println(" * @generated " + getClass().getName());
-            out.println(" */");
             out.println("@Slf4j");
             out.println("@Configuration");
             out.println("@RequiredArgsConstructor");
             out.println("public class " + generatedClassName + " {");
             out.println();
-
             out.println(INDENT + "private final " + className + " delegate;");
             out.println();
-
-            out.println(INDENT + "/**");
-            out.println(INDENT + " * Creates an item writer that filters null items before persistence.");
-            out.println(INDENT + " * ");
-            out.println(INDENT + " * @return configured ItemWriter instance");
-            out.println(INDENT + " */");
             out.println(INDENT + "@Bean");
-            out.println(INDENT + "public ItemWriter<" + wrapperClassName + "> " + beanName + "() {");
-            out.println(INDENT + INDENT + "return chunk -> {");
-            out.println(INDENT + INDENT + INDENT + "List<" + wrapperClassName + "> validItems = chunk.getItems().stream()");
-            out.println(INDENT + INDENT + INDENT + INDENT + INDENT + ".filter(Objects::nonNull)");
-            out.println(INDENT + INDENT + INDENT + INDENT + INDENT + ".collect(Collectors.toList());");
-            out.println();
-            out.println(INDENT + INDENT + INDENT + "if (validItems.isEmpty()) {");
-            out.println(INDENT + INDENT + INDENT + INDENT + "log.warn(\"No valid items to write in current chunk\");");
-            out.println(INDENT + INDENT + INDENT + INDENT + "return;");
-            out.println(INDENT + INDENT + INDENT + "}");
-            out.println();
-            out.println(INDENT + INDENT + INDENT + "log.debug(\"Writing {} items to persistence layer\", validItems.size());");
-            out.println(INDENT + INDENT + INDENT + "delegate.save(validItems);");
-            out.println(INDENT + INDENT + "};");
+            out.println(INDENT + "public ItemWriter<" + wrapperClassName + "> " + stepName + "ItemWriter() {");
+            out.println(DOUBLE_INDENT + "return chunk -> {");
+            out.println(TRIPLE_INDENT + "List<" + wrapperClassName + "> validItems = chunk.getItems().stream().filter(Objects::nonNull).collect(Collectors.toList());");
+            out.println(TRIPLE_INDENT + "if (validItems.isEmpty()) { log.warn(\"No valid items to write\"); return; }");
+            if (dryRun) {
+                out.println(TRIPLE_INDENT + "log.info(\"[DRY RUN] Would write {} items\", validItems.size());");
+            } else {
+                out.println(TRIPLE_INDENT + "log.debug(\"Writing {} items\", validItems.size()); delegate.save(validItems);");
+            }
+            out.println(DOUBLE_INDENT + "};");
             out.println(INDENT + "}");
             out.println("}");
         }
     }
 
-    private void generateSkipListener(String packageName, String className, String stepName,
-                                      String dtoClassName, String wrapperClassName,
-                                      String dtoClassFqn, String wrapperClassFqn) throws IOException {
+    private void generateSkipListener(String packageName, String className, String stepName, String dtoClassName, String wrapperClassName, String dtoClassFqn, String wrapperClassFqn) throws IOException {
         String generatedClassName = className + "SkipListener";
         JavaFileObject file = processingEnv.getFiler().createSourceFile(packageName + "." + generatedClassName);
 
@@ -403,126 +327,55 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import org.springframework.batch.core.SkipListener;");
             out.println("import org.springframework.lang.NonNull;");
             out.println("import org.springframework.stereotype.Component;");
-            out.println();
             out.println("import static com.eazy.batch.utility.BatchUtility.addSkippedItem;");
             out.println();
-
-            out.println("/**");
-            out.println(" * Skip Listener for " + className);
-            out.println(" * <p>Tracks and logs skipped items during read, process, and write phases.</p>");
-            out.println(" * <p><b>DO NOT MODIFY</b> - Auto-generated by {@link BatchJobAnnotationProcessor}.</p>");
-            out.println(" * ");
-            out.println(" * @see " + className);
-            out.println(" * @generated " + getClass().getName());
-            out.println(" */");
             out.println("@Slf4j");
             out.println("@Component");
             out.println("@RequiredArgsConstructor");
             out.println("public class " + generatedClassName + " implements SkipListener<" + dtoClassName + ", " + wrapperClassName + "> {");
             out.println();
-
             out.println(INDENT + "private final " + className + " delegate;");
             out.println();
-
-            // onSkipInRead
-            out.println(INDENT + "/**");
-            out.println(INDENT + " * Handles skipped items during the read phase.");
-            out.println(INDENT + " * ");
-            out.println(INDENT + " * @param throwable the exception that caused the skip");
-            out.println(INDENT + " */");
             out.println(INDENT + "@Override");
             out.println(INDENT + "public void onSkipInRead(@NonNull Throwable throwable) {");
-            out.println(INDENT + INDENT + "String errorMessage = throwable.getMessage();");
-            out.println(INDENT + INDENT + "addSkippedItem(null, \"READ\", errorMessage);");
-            out.println(INDENT + INDENT + "log.error(\"[SKIP-READ] Error reading item: {}\", errorMessage, throwable);");
+            out.println(DOUBLE_INDENT + "addSkippedItem(null, \"READ\", throwable.getMessage());");
+            out.println(DOUBLE_INDENT + "log.error(\"[SKIP-READ] {}\", throwable.getMessage(), throwable);");
             out.println(INDENT + "}");
             out.println();
-
-            // onSkipInProcess
-            out.println(INDENT + "/**");
-            out.println(INDENT + " * Handles skipped items during the process phase.");
-            out.println(INDENT + " * ");
-            out.println(INDENT + " * @param dto the DTO that failed processing");
-            out.println(INDENT + " * @param throwable the exception that caused the skip");
-            out.println(INDENT + " */");
             out.println(INDENT + "@Override");
             out.println(INDENT + "public void onSkipInProcess(@NonNull " + dtoClassName + " dto, @NonNull Throwable throwable) {");
-            out.println(INDENT + INDENT + "String identifier = delegate.getIdentifier(dto);");
-            out.println(INDENT + INDENT + "String errorMessage = throwable.getMessage();");
-            out.println(INDENT + INDENT + "addSkippedItem(dto, \"PROCESS\", errorMessage);");
-            out.println(INDENT + INDENT + "log.error(\"[SKIP-PROCESS] Error processing item [{}]: {}\", identifier, errorMessage, throwable);");
+            out.println(DOUBLE_INDENT + "addSkippedItem(dto, \"PROCESS\", throwable.getMessage());");
+            out.println(DOUBLE_INDENT + "log.error(\"[SKIP-PROCESS] {}: {}\", delegate.getIdentifier(dto), throwable.getMessage(), throwable);");
             out.println(INDENT + "}");
             out.println();
-
-            // onSkipInWrite
-            out.println(INDENT + "/**");
-            out.println(INDENT + " * Handles skipped items during the write phase.");
-            out.println(INDENT + " * ");
-            out.println(INDENT + " * @param wrapper the wrapper that failed to write");
-            out.println(INDENT + " * @param throwable the exception that caused the skip");
-            out.println(INDENT + " */");
             out.println(INDENT + "@Override");
             out.println(INDENT + "public void onSkipInWrite(@NonNull " + wrapperClassName + " wrapper, @NonNull Throwable throwable) {");
-            out.println(INDENT + INDENT + "String identifier = delegate.getIdentifier(wrapper);");
-            out.println(INDENT + INDENT + "String errorMessage = throwable.getMessage();");
-            out.println(INDENT + INDENT + "addSkippedItem(wrapper, \"WRITE\", errorMessage);");
-            out.println(INDENT + INDENT + "log.error(\"[SKIP-WRITE] Error writing item [{}]: {}\", identifier, errorMessage, throwable);");
+            out.println(DOUBLE_INDENT + "addSkippedItem(wrapper, \"WRITE\", throwable.getMessage());");
+            out.println(DOUBLE_INDENT + "log.error(\"[SKIP-WRITE] {}: {}\", delegate.getIdentifier(wrapper), throwable.getMessage(), throwable);");
             out.println(INDENT + "}");
             out.println("}");
         }
     }
 
-    /**
-     * Extracts the fully qualified class name from annotation attribute using MirroredTypeException.
-     *
-     * @param annotation the BatchJob annotation
-     * @param methodName the method name ("dtoClass" or "wrapperClass")
-     * @return fully qualified class name
-     */
-    private String getClassFqn(BatchJob annotation, String methodName) {
+    private @Nullable String getClassFqn(BatchJob annotation, String methodName) {
         try {
-            if ("dtoClass".equals(methodName)) {
-                annotation.dtoClass();
-            } else {
-                annotation.wrapperClass();
-            }
-            return null; // Should never reach here
+            if ("dtoClass".equals(methodName)) annotation.dtoClass(); else annotation.wrapperClass();
+            return null;
         } catch (MirroredTypeException mte) {
-            DeclaredType classTypeMirror = (DeclaredType) mte.getTypeMirror();
-            TypeElement classTypeElement = (TypeElement) classTypeMirror.asElement();
-            return classTypeElement.getQualifiedName().toString();
+            return ((TypeElement) ((DeclaredType) mte.getTypeMirror()).asElement()).getQualifiedName().toString();
         }
     }
 
-    /**
-     * Extracts simple class name from fully qualified name.
-     *
-     * @param fqn fully qualified class name
-     * @return simple class name
-     */
-    private String getSimpleName(String fqn) {
-        if (fqn == null || fqn.isEmpty()) {
-            return "";
-        }
-        int lastDotIndex = fqn.lastIndexOf('.');
-        return lastDotIndex >= 0 ? fqn.substring(lastDotIndex + 1) : fqn;
+    private @NotNull String getSimpleName(String fqn) {
+        if (fqn == null || fqn.isEmpty()) return "";
+        int lastDot = fqn.lastIndexOf('.');
+        return lastDot >= 0 ? fqn.substring(lastDot + 1) : fqn;
     }
 
-    /**
-     * Logs informational messages during annotation processing.
-     *
-     * @param message the message to log
-     */
     private void logInfo(String message) {
         processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE, message);
     }
 
-    /**
-     * Logs error messages during annotation processing.
-     *
-     * @param message the error message
-     * @param element the element that caused the error
-     */
     private void logError(String message, Element element) {
         processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR, message, element);
     }
