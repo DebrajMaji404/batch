@@ -1,7 +1,8 @@
 package com.eazy.batch.listener;
 
-import org.springframework.batch.core.JobExecution;
-import org.springframework.batch.core.JobExecutionListener;
+
+import org.springframework.batch.core.job.JobExecution;
+import org.springframework.batch.core.listener.JobExecutionListener;
 
 /**
  * Interface for custom job completion listeners.

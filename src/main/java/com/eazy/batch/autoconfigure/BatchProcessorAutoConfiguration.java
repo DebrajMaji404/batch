@@ -7,8 +7,8 @@ import com.eazy.batch.service.MetricsService;
 import com.eazy.batch.service.ProgressTrackingService;
 import jakarta.validation.Validator;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
-import org.springframework.batch.core.launch.support.TaskExecutorJobLauncher;
+import org.springframework.batch.core.launch.JobOperator;
+import org.springframework.batch.core.launch.support.TaskExecutorJobOperator;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.CommandLineRunner;
@@ -34,10 +34,9 @@ import javax.sql.DataSource;
  */
 @Slf4j
 @AutoConfiguration
-@ConditionalOnClass(EnableBatchProcessing.class)
+@ConditionalOnClass(JobRepository.class)
 @ConditionalOnProperty(prefix = "eazy.batch", name = "enabled", havingValue = "true", matchIfMissing = true)
 @EnableConfigurationProperties(BatchProcessorProperties.class)
-@EnableBatchProcessing
 @EnableScheduling
 public class BatchProcessorAutoConfiguration {
 
@@ -60,7 +59,7 @@ public class BatchProcessorAutoConfiguration {
                 // Check if batch tables already exist
                 String checkTableQuery =
                         "SELECT COUNT(*) FROM information_schema.tables " +
-                                "WHERE table_schema = 'public' AND table_name = 'batch_job_instance'";
+                        "WHERE table_schema = 'public' AND table_name = 'batch_job_instance'";
 
                 Integer count = jdbcTemplate.queryForObject(checkTableQuery, Integer.class);
 
@@ -108,19 +107,19 @@ public class BatchProcessorAutoConfiguration {
     }
 
     /**
-     * Job launcher with task executor
+     * Job operator (replaces deprecated JobLauncher/TaskExecutorJobLauncher in Spring Batch 6)
      */
     @Bean
-    @ConditionalOnMissingBean
-    public TaskExecutorJobLauncher jobLauncher(
+    @ConditionalOnMissingBean(JobOperator.class)
+    public JobOperator jobOperator(
             JobRepository jobRepository,
             @Qualifier("batchTaskExecutor") TaskExecutor taskExecutor) throws Exception {
-        TaskExecutorJobLauncher launcher = new TaskExecutorJobLauncher();
-        launcher.setJobRepository(jobRepository);
-        launcher.setTaskExecutor(taskExecutor);
-        launcher.afterPropertiesSet();
-        log.info("✅ Job Launcher configured");
-        return launcher;
+        TaskExecutorJobOperator operator = new TaskExecutorJobOperator();
+        operator.setJobRepository(jobRepository);
+        operator.setTaskExecutor(taskExecutor);
+        operator.afterPropertiesSet();
+        log.info("✅ Job Operator configured");
+        return operator;
     }
 
     /**

@@ -7,8 +7,8 @@ import com.opencsv.exceptions.CsvValidationException;
 import com.poiji.annotation.ExcelCellName;
 import lombok.extern.slf4j.Slf4j;
 import org.jetbrains.annotations.NotNull;
-import org.springframework.batch.item.ItemReader;
-import org.springframework.batch.item.file.FlatFileParseException;
+import org.springframework.batch.infrastructure.item.ItemReader;
+import org.springframework.batch.infrastructure.item.file.FlatFileParseException;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.core.io.Resource;
 
@@ -20,16 +20,25 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 /**
- * CSV Item Reader with header validation
- * NEW FEATURE: CSV file support
+ * CSV Item Reader with header validation.
+ *
+ * KEY FIX: All initialization (opening the file, reading headers, validating headers)
+ * is deferred from the constructor into lazyInitialize(), which is called on the
+ * first read() call. This ensures that InvalidTemplateException (missing/extra
+ * headers, empty file, etc.) is thrown from read() — the only place Spring Batch's
+ * skip mechanism and onSkipInRead listeners can intercept it.
+ *
+ * Exceptions thrown from a constructor bypass Spring Batch's skip/listener
+ * infrastructure entirely.
  */
 @Slf4j
 public class CSVItemReader<T> implements ItemReader<T>, DisposableBean {
 
+    private final Resource resource;
     private final Class<T> type;
     private final String datePattern;
-    private final Map<String, Integer> headerIndexMap;
     private final Map<String, Field> fieldMap;
+    private final Map<String, Integer> headerIndexMap = new HashMap<>();
 
     private CSVReader csvReader;
     private String[] headers;
@@ -37,54 +46,64 @@ public class CSVItemReader<T> implements ItemReader<T>, DisposableBean {
     private boolean initialized = false;
 
     public CSVItemReader(@NotNull Resource resource, Class<T> type) {
-        try {
-            this.type = type;
-            this.datePattern = detectDatePattern(type);
-            this.fieldMap = buildFieldMap(type);
-            this.headerIndexMap = new HashMap<>();
+        // Only store lightweight metadata in the constructor — no I/O, no validation.
+        // Any exception here would escape Spring Batch's skip/listener infrastructure.
+        this.resource = resource;
+        this.type = type;
+        this.datePattern = detectDatePattern(type);
+        this.fieldMap = buildFieldMap(type);
+    }
 
-            // Initialize CSV reader
-            this.csvReader = new CSVReader(new FileReader(resource.getFile()));
+    /**
+     * Opens the file, reads and validates headers on the first read() call.
+     * Any InvalidTemplateException thrown here propagates up through read()
+     * and is properly caught by Spring Batch's skip/listener infrastructure.
+     */
+    private void lazyInitialize() {
+        if (!initialized) {
+            try {
+                this.csvReader = new CSVReader(new FileReader(resource.getFile()));
 
-            // Read and validate headers
-            this.headers = csvReader.readNext();
-            if (headers == null || headers.length == 0) {
-                throw new InvalidTemplateException("CSV file does not contain headers");
+                this.headers = csvReader.readNext();
+                if (headers == null || headers.length == 0) {
+                    throw new InvalidTemplateException("CSV file does not contain headers");
+                }
+
+                for (int i = 0; i < headers.length; i++) {
+                    headerIndexMap.put(headers[i].trim(), i);
+                }
+
+                // Validate headers here (deferred from constructor) so exceptions
+                // surface in read() and are routed to the skip listener.
+                validateHeaders();
+
+                this.initialized = true;
+                log.info("✅ CSV reader initialized with {} columns", headers.length);
+
+            } catch (InvalidTemplateException e) {
+                closeReader();
+                throw e; // re-throw as-is; read() wraps it in FlatFileParseException
+            } catch (IOException | CsvValidationException e) {
+                closeReader();
+                throw new RuntimeException("Failed to read CSV file", e);
             }
-
-            // Build header index map
-            for (int i = 0; i < headers.length; i++) {
-                headerIndexMap.put(headers[i].trim(), i);
-            }
-
-            validateHeaders();
-            this.initialized = true;
-
-            log.info("✅ CSV reader initialized with {} columns", headers.length);
-
-        } catch (IOException | CsvValidationException e) {
-            throw new RuntimeException("Failed to read CSV file", e);
         }
     }
 
     @Override
     public T read() {
-        if (!initialized) {
-            throw new IllegalStateException("CSV reader not initialized");
-        }
-
         try {
+            lazyInitialize();
+
             String[] row = csvReader.readNext();
 
             if (row == null) {
-                // End of file
                 closeReader();
                 return null;
             }
 
             currentRowIndex++;
 
-            // Skip empty rows
             if (isEmptyRow(row)) {
                 log.debug("Skipping empty row at index {}", currentRowIndex);
                 return read();
@@ -92,7 +111,11 @@ public class CSVItemReader<T> implements ItemReader<T>, DisposableBean {
 
             return parseRow(row, currentRowIndex);
 
+        } catch (FlatFileParseException e) {
+            throw e; // already wrapped, don't double-wrap
         } catch (Exception e) {
+            // Wrap ALL exceptions (including InvalidTemplateException from lazyInitialize)
+            // in FlatFileParseException so Spring Batch routes them to onSkipInRead.
             throw new FlatFileParseException(
                     "Error parsing CSV row " + currentRowIndex + ": " + e.getMessage(),
                     e,
@@ -119,14 +142,10 @@ public class CSVItemReader<T> implements ItemReader<T>, DisposableBean {
             Field field = entry.getValue();
             Integer columnIndex = headerIndexMap.get(headerName);
 
-            if (columnIndex == null || columnIndex >= row.length) {
-                continue;
-            }
+            if (columnIndex == null || columnIndex >= row.length) continue;
 
             String cellValue = row[columnIndex];
-            if (cellValue == null || cellValue.trim().isEmpty()) {
-                continue;
-            }
+            if (cellValue == null || cellValue.trim().isEmpty()) continue;
 
             field.setAccessible(true);
             Object value = parseCellValue(cellValue.trim(), field, rowNum, columnIndex);
@@ -166,7 +185,7 @@ public class CSVItemReader<T> implements ItemReader<T>, DisposableBean {
             throw new RuntimeException(
                     String.format(
                             "Failed to parse value '%s' for field '%s' (column '%s') " +
-                                    "at row %d, column %d: %s",
+                            "at row %d, column %d: %s",
                             value, field.getName(), headerName,
                             rowNum, columnIndex, e.getMessage()
                     ),
@@ -176,25 +195,21 @@ public class CSVItemReader<T> implements ItemReader<T>, DisposableBean {
     }
 
     private Object parseEnum(Class<?> enumType, String value, int rowNum, int columnIndex) {
-        // Try fromDisplayName method
         try {
             var method = enumType.getMethod("fromDisplayName", String.class);
             Object result = method.invoke(null, value);
             if (result != null) return result;
         } catch (Exception ignored) {}
 
-        // Try valueOf
         try {
             var method = enumType.getMethod("valueOf", String.class);
             return method.invoke(null, value);
         } catch (Exception e1) {
-            // Try normalized
             try {
                 var normalized = value.toUpperCase().replace(" ", "_");
                 var method = enumType.getMethod("valueOf", String.class);
                 return method.invoke(null, normalized);
             } catch (Exception e2) {
-                // Try case-insensitive match
                 for (Object constant : enumType.getEnumConstants()) {
                     if (constant.toString().equalsIgnoreCase(value)) {
                         return constant;
@@ -205,8 +220,7 @@ public class CSVItemReader<T> implements ItemReader<T>, DisposableBean {
 
         throw new IllegalArgumentException(
                 String.format(
-                        "Cannot convert '%s' to enum %s at row %d, column %d. " +
-                                "Valid values: %s",
+                        "Cannot convert '%s' to enum %s at row %d, column %d. Valid values: %s",
                         value, enumType.getSimpleName(), rowNum, columnIndex,
                         Arrays.toString(enumType.getEnumConstants())
                 )
@@ -224,6 +238,10 @@ public class CSVItemReader<T> implements ItemReader<T>, DisposableBean {
         return map;
     }
 
+    /**
+     * Validates that the CSV headers match the fields annotated with @ExcelCellName.
+     * Called from lazyInitialize() (not the constructor) so exceptions surface in read().
+     */
     private void validateHeaders() {
         Set<String> csvHeaders = new HashSet<>();
         for (String header : headers) {
@@ -231,12 +249,13 @@ public class CSVItemReader<T> implements ItemReader<T>, DisposableBean {
         }
 
         List<String> expectedHeaders = getExpectedHeaders(type);
+
         List<String> missingHeaders = expectedHeaders.stream()
-                .filter(header -> !csvHeaders.contains(header))
+                .filter(h -> !csvHeaders.contains(h))
                 .toList();
 
         List<String> extraHeaders = csvHeaders.stream()
-                .filter(header -> !expectedHeaders.contains(header))
+                .filter(h -> !expectedHeaders.contains(h))
                 .toList();
 
         if (!missingHeaders.isEmpty() || !extraHeaders.isEmpty()) {
@@ -256,8 +275,7 @@ public class CSVItemReader<T> implements ItemReader<T>, DisposableBean {
     private String detectDatePattern(@NotNull Class<T> type) {
         for (Field field : type.getDeclaredFields()) {
             if (field.isAnnotationPresent(ExcelDateFormat.class)) {
-                ExcelDateFormat dateFormat = field.getAnnotation(ExcelDateFormat.class);
-                return dateFormat.pattern();
+                return field.getAnnotation(ExcelDateFormat.class).pattern();
             }
         }
         return "yyyy-MM-dd";

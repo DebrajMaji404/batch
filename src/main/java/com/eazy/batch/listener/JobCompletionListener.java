@@ -5,13 +5,12 @@ import com.eazy.batch.utility.BatchUtility;
 import lombok.extern.slf4j.Slf4j;
 import org.jetbrains.annotations.NotNull;
 import org.springframework.batch.core.BatchStatus;
-import org.springframework.batch.core.JobExecution;
-import org.springframework.batch.core.JobExecutionListener;
+import org.springframework.batch.core.job.JobExecution;
+import org.springframework.batch.core.listener.JobExecutionListener;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
-import java.time.ZoneOffset;
 import java.util.List;
 
 /**
@@ -39,12 +38,12 @@ public class JobCompletionListener implements JobExecutionListener {
         String jobName = jobExecution.getJobInstance().getJobName();
         BatchStatus status = jobExecution.getStatus();
 
-        // Calculate execution time - FIXED
+        // Calculate execution time - Spring Batch 5 returns LocalDateTime directly
         Duration duration = Duration.ZERO;
         if (jobExecution.getStartTime() != null && jobExecution.getEndTime() != null) {
             duration = Duration.between(
-                    jobExecution.getStartTime().toInstant(ZoneOffset.UTC),
-                    jobExecution.getEndTime().toInstant(ZoneOffset.UTC)
+                    jobExecution.getStartTime(),
+                    jobExecution.getEndTime()
             );
         }
 
@@ -56,7 +55,7 @@ public class JobCompletionListener implements JobExecutionListener {
         } else if (status == BatchStatus.FAILED) {
             log.error("❌ Job '{}' failed", jobName);
             if (jobExecution.getAllFailureExceptions() != null &&
-                    !jobExecution.getAllFailureExceptions().isEmpty()) {
+                !jobExecution.getAllFailureExceptions().isEmpty()) {
                 log.error("Failure reasons:");
                 jobExecution.getAllFailureExceptions().forEach(throwable ->
                         log.error("  - {}", throwable.getMessage())

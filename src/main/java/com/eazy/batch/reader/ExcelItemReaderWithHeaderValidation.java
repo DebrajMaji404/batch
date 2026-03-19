@@ -4,11 +4,10 @@ import com.eazy.batch.annotation.ExcelDateFormat;
 import com.eazy.batch.exception.InvalidTemplateException;
 import com.poiji.annotation.ExcelCellName;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
 import org.apache.poi.ss.usermodel.*;
 import org.jetbrains.annotations.NotNull;
-import org.springframework.batch.item.ItemReader;
-import org.springframework.batch.item.file.FlatFileParseException;
+import org.springframework.batch.infrastructure.item.ItemReader;
+import org.springframework.batch.infrastructure.item.file.FlatFileParseException;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.core.io.Resource;
 
@@ -20,12 +19,20 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 /**
- * Row-by-row Excel reader that properly handles skippable exceptions
- * FIXED: Resource leak - now implements DisposableBean
- * FIXED: Empty workbook handling
+ * Row-by-row Excel reader that properly handles skippable exceptions.
+ *
+ * KEY FIX: Header validation is deferred out of the constructor and into
+ * lazyInitialize(), which is called from read(). This ensures that any
+ * InvalidTemplateException (missing/extra headers, missing sheet, etc.)
+ * is thrown from within read() — the only place Spring Batch's skip
+ * mechanism and onSkipInRead listeners can intercept it.
+ *
+ * Exceptions thrown from a constructor are invisible to Spring Batch's
+ * skip/listener infrastructure entirely.
  */
 @Slf4j
 public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, DisposableBean {
+
     private final File file;
     private final Class<T> type;
     private final String datePattern;
@@ -51,21 +58,24 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
             this.sheetName = sheetName;
             this.datePattern = detectDatePattern(type);
             this.fieldMap = buildFieldMap(type);
-
-            // Validate headers immediately - fail fast for template issues
-            validateHeaders(file, type);
-
-        } catch (IOException | InvalidFormatException e) {
-            throw new RuntimeException("Failed to read Excel file", e);
+            // NOTE: Header validation is intentionally deferred to lazyInitialize()
+            // which is called from read(), so Spring Batch's skip mechanism and
+            // onSkipInRead listeners can intercept any InvalidTemplateException.
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to resolve Excel file resource", e);
         }
     }
 
+    /**
+     * Opens the workbook and validates headers on first read() call.
+     * Any InvalidTemplateException thrown here propagates up through read()
+     * and is properly caught by Spring Batch's skip/listener infrastructure.
+     */
     private void lazyInitialize() {
         if (!initialized) {
             try {
                 this.workbook = WorkbookFactory.create(file);
 
-                // FIXED: Check if workbook has sheets
                 if (workbook.getNumberOfSheets() == 0) {
                     throw new InvalidTemplateException("Excel file has no sheets");
                 }
@@ -82,15 +92,22 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
                     if (sheetIndex >= workbook.getNumberOfSheets()) {
                         throw new InvalidTemplateException(
                                 "Sheet index " + sheetIndex + " out of bounds. " +
-                                        "Workbook has " + workbook.getNumberOfSheets() + " sheets"
+                                "Workbook has " + workbook.getNumberOfSheets() + " sheets"
                         );
                     }
                     this.sheet = workbook.getSheetAt(sheetIndex);
                 }
 
+                // Validate headers after opening the sheet — deferred from constructor
+                // so that this exception flows through read() to the skip listener.
+                validateHeaders();
+
                 this.initialized = true;
-                log.info("Excel reader initialized: {} rows to process",
-                        sheet.getLastRowNum());
+                log.info("✅ Excel reader initialized: {} rows to process", sheet.getLastRowNum());
+
+            } catch (InvalidTemplateException e) {
+                closeWorkbook();
+                throw e; // re-throw as-is; read() wraps it in FlatFileParseException
             } catch (Exception e) {
                 closeWorkbook();
                 throw new RuntimeException("Failed to open Excel file", e);
@@ -104,7 +121,6 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
             lazyInitialize();
 
             if (currentRowIndex > sheet.getLastRowNum()) {
-                // Close workbook when done
                 closeWorkbook();
                 return null;
             }
@@ -114,16 +130,19 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
             currentRowIndex++;
 
             if (row == null || isEmptyRow(row)) {
-                // Skip empty rows
                 log.debug("Skipping empty row at index {}", rowNum);
                 return read();
             }
 
             return parseRow(row, rowNum);
+
+        } catch (FlatFileParseException e) {
+            throw e; // already wrapped, don't double-wrap
         } catch (Exception e) {
-            // Wrap in FlatFileParseException so Spring Batch can handle it
+            // Wrap ALL exceptions (including InvalidTemplateException from lazyInitialize)
+            // in FlatFileParseException so Spring Batch routes them to onSkipInRead.
             throw new FlatFileParseException(
-                    "Error parsing row " + currentRowIndex + ": " + e.getMessage(),
+                    "Error reading row " + currentRowIndex + ": " + e.getMessage(),
                     e,
                     "",
                     currentRowIndex
@@ -151,16 +170,12 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
             int columnIndex = cell.getColumnIndex();
             Cell headerCell = headerRow.getCell(columnIndex);
 
-            if (headerCell == null) {
-                continue;
-            }
+            if (headerCell == null) continue;
 
             String headerName = headerCell.getStringCellValue();
             Field field = fieldMap.get(headerName);
 
-            if (field == null) {
-                continue;
-            }
+            if (field == null) continue;
 
             field.setAccessible(true);
             Object value = parseCellValue(cell, field, rowNum, columnIndex);
@@ -194,13 +209,11 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
             } else if (fieldType == Boolean.class || fieldType == boolean.class) {
                 return Boolean.valueOf(stringValue.trim());
             } else if (fieldType == LocalDate.class) {
-                // Check for custom date format on field
                 String pattern = datePattern;
                 if (field.isAnnotationPresent(ExcelDateFormat.class)) {
                     pattern = field.getAnnotation(ExcelDateFormat.class).pattern();
                 }
-                return LocalDate.parse(stringValue.trim(),
-                        DateTimeFormatter.ofPattern(pattern));
+                return LocalDate.parse(stringValue.trim(), DateTimeFormatter.ofPattern(pattern));
             } else if (fieldType.isEnum()) {
                 return parseEnum(fieldType, stringValue.trim(), rowNum, columnIndex);
             }
@@ -211,7 +224,7 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
             throw new RuntimeException(
                     String.format(
                             "Failed to parse value '%s' for field '%s' (column '%s') " +
-                                    "at row %d, column %d: %s",
+                            "at row %d, column %d: %s",
                             stringValue, field.getName(), headerName,
                             rowNum, columnIndex, e.getMessage()
                     ),
@@ -229,7 +242,6 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
                             .format(DateTimeFormatter.ofPattern(datePattern));
                 }
                 double numericValue = cell.getNumericCellValue();
-                // Check if it's a whole number
                 if (numericValue == Math.floor(numericValue)) {
                     yield String.valueOf((long) numericValue);
                 }
@@ -242,25 +254,21 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
     }
 
     private Object parseEnum(Class<?> enumType, String value, int rowNum, int columnIndex) {
-        // Try fromDisplayName method
         try {
             var method = enumType.getMethod("fromDisplayName", String.class);
             Object result = method.invoke(null, value);
             if (result != null) return result;
         } catch (Exception ignored) {}
 
-        // Try valueOf
         try {
             var method = enumType.getMethod("valueOf", String.class);
             return method.invoke(null, value);
         } catch (Exception e1) {
-            // Try normalized (uppercase with underscores)
             try {
                 var normalized = value.toUpperCase().replace(" ", "_");
                 var method = enumType.getMethod("valueOf", String.class);
                 return method.invoke(null, normalized);
             } catch (Exception e2) {
-                // Try case-insensitive match
                 for (Object constant : enumType.getEnumConstants()) {
                     if (constant.toString().equalsIgnoreCase(value)) {
                         return constant;
@@ -271,8 +279,7 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
 
         throw new IllegalArgumentException(
                 String.format(
-                        "Cannot convert '%s' to enum %s at row %d, column %d. " +
-                                "Valid values: %s",
+                        "Cannot convert '%s' to enum %s at row %d, column %d. Valid values: %s",
                         value, enumType.getSimpleName(), rowNum, columnIndex,
                         Arrays.toString(enumType.getEnumConstants())
                 )
@@ -290,77 +297,57 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
         return map;
     }
 
-    private void validateHeaders(File file, Class<T> type) throws IOException, InvalidFormatException {
-        try (Workbook workbook = WorkbookFactory.create(file)) {
-            // FIXED: Check if workbook has sheets
-            if (workbook.getNumberOfSheets() == 0) {
-                throw new InvalidTemplateException("Excel file has no sheets");
-            }
+    /**
+     * Validates that the sheet headers match the fields annotated with @ExcelCellName.
+     * Called from lazyInitialize() (not the constructor) so exceptions surface in read().
+     */
+    private void validateHeaders() {
+        Row headerRow = sheet.getRow(0);
 
-            Sheet sheet;
-            if (sheetName != null && !sheetName.isEmpty()) {
-                sheet = workbook.getSheet(sheetName);
-                if (sheet == null) {
-                    throw new InvalidTemplateException(
-                            "Sheet '" + sheetName + "' not found in workbook"
-                    );
-                }
-            } else {
-                if (sheetIndex >= workbook.getNumberOfSheets()) {
-                    throw new InvalidTemplateException(
-                            "Sheet index " + sheetIndex + " out of bounds"
-                    );
-                }
-                sheet = workbook.getSheetAt(sheetIndex);
-            }
-
-            Row headerRow = sheet.getRow(0);
-
-            if (headerRow == null) {
-                throw new InvalidTemplateException(
-                        "Excel file does not contain a header row in sheet: " +
-                                (sheetName != null ? sheetName : "index " + sheetIndex)
-                );
-            }
-
-            List<String> excelHeaders = new ArrayList<>();
-            for (Cell cell : headerRow) {
-                String header = cell.getStringCellValue();
-                if (header != null && !header.trim().isEmpty()) {
-                    excelHeaders.add(header.trim());
-                }
-            }
-
-            List<String> expectedHeaders = getExpectedHeaders(type);
-            List<String> missingHeaders = expectedHeaders.stream()
-                    .filter(header -> !excelHeaders.contains(header))
-                    .toList();
-
-            List<String> extraHeaders = excelHeaders.stream()
-                    .filter(header -> !expectedHeaders.contains(header))
-                    .toList();
-
-            if (!missingHeaders.isEmpty() || !extraHeaders.isEmpty()) {
-                StringBuilder errorMsg = new StringBuilder("Invalid template. ");
-                if (!missingHeaders.isEmpty()) {
-                    errorMsg.append("Missing headers: ").append(missingHeaders).append(". ");
-                }
-                if (!extraHeaders.isEmpty()) {
-                    errorMsg.append("Extra headers: ").append(extraHeaders).append(".");
-                }
-                throw new InvalidTemplateException(errorMsg.toString().trim());
-            }
-
-            log.info("✅ Excel headers validated successfully for sheet: {}",
-                    sheetName != null ? sheetName : "index " + sheetIndex);
+        if (headerRow == null) {
+            throw new InvalidTemplateException(
+                    "Excel file does not contain a header row in sheet: " +
+                    (sheetName != null ? sheetName : "index " + sheetIndex)
+            );
         }
+
+        List<String> excelHeaders = new ArrayList<>();
+        for (Cell cell : headerRow) {
+            String header = cell.getStringCellValue();
+            if (header != null && !header.trim().isEmpty()) {
+                excelHeaders.add(header.trim());
+            }
+        }
+
+        List<String> expectedHeaders = getExpectedHeaders(type);
+
+        List<String> missingHeaders = expectedHeaders.stream()
+                .filter(h -> !excelHeaders.contains(h))
+                .toList();
+
+        List<String> extraHeaders = excelHeaders.stream()
+                .filter(h -> !expectedHeaders.contains(h))
+                .toList();
+
+        if (!missingHeaders.isEmpty() || !extraHeaders.isEmpty()) {
+            StringBuilder errorMsg = new StringBuilder("Invalid template. ");
+            if (!missingHeaders.isEmpty()) {
+                errorMsg.append("Missing headers: ").append(missingHeaders).append(". ");
+            }
+            if (!extraHeaders.isEmpty()) {
+                errorMsg.append("Extra headers: ").append(extraHeaders).append(".");
+            }
+            throw new InvalidTemplateException(errorMsg.toString().trim());
+        }
+
+        log.info("✅ Excel headers validated successfully for sheet: {}",
+                sheetName != null ? sheetName : "index " + sheetIndex);
     }
 
     private String detectDatePattern(@NotNull Class<T> type) {
         for (Field field : type.getDeclaredFields()) {
             if (field.isAnnotationPresent(ExcelDateFormat.class)) {
-                ExcelDateFormat dateFormat = field.getAnnotation(ExcelDateFormat.class);
-                return dateFormat.pattern();
+                return field.getAnnotation(ExcelDateFormat.class).pattern();
             }
         }
         return "yyyy-MM-dd";
@@ -391,9 +378,6 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
         }
     }
 
-    /**
-     * FIXED: Implement DisposableBean to ensure resource cleanup
-     */
     @Override
     public void destroy() {
         closeWorkbook();
