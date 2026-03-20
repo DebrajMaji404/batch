@@ -46,6 +46,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
 
     @Override
     public boolean process(Set<? extends TypeElement> annotations, @NotNull RoundEnvironment roundEnv) {
+        logInfo("Processing started");
         for (Element element : roundEnv.getElementsAnnotatedWith(BatchJob.class)) {
             if (element instanceof TypeElement typeElement) {
                 try {
@@ -110,16 +111,19 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import " + wrapperClassFqn + ";");
             out.println("import lombok.RequiredArgsConstructor;");
             out.println("import lombok.extern.slf4j.Slf4j;");
-            out.println("import org.springframework.batch.core.Job;");
-            out.println("import org.springframework.batch.core.SkipListener;");
-            out.println("import org.springframework.batch.core.Step;");
+            out.println("import org.springframework.batch.core.job.Job;");
+            out.println("import org.springframework.batch.core.listener.SkipListener;");
+            out.println("import org.springframework.batch.core.step.Step;");
             out.println("import org.springframework.batch.core.job.builder.JobBuilder;");
-            out.println("import org.springframework.batch.core.launch.support.RunIdIncrementer;");
+            out.println("import org.springframework.batch.core.job.parameters.RunIdIncrementer;");
             out.println("import org.springframework.batch.core.repository.JobRepository;");
-            out.println("import org.springframework.batch.core.step.builder.StepBuilder;");
-            out.println("import org.springframework.batch.item.ItemProcessor;");
-            out.println("import org.springframework.batch.item.ItemReader;");
-            out.println("import org.springframework.batch.item.ItemWriter;");
+            out.println("import org.springframework.batch.core.step.builder.ChunkOrientedStepBuilder;");
+            out.println("import org.springframework.batch.core.step.skip.LimitCheckingExceptionHierarchySkipPolicy;");
+            out.println("import java.util.Set;");
+            out.println("import org.springframework.batch.infrastructure.item.ItemProcessor;");
+            out.println("import org.springframework.batch.infrastructure.item.ItemReader;");
+            out.println("import org.springframework.batch.infrastructure.item.ItemWriter;");
+            out.println("import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;");
             out.println("import org.springframework.context.annotation.Bean;");
             out.println("import org.springframework.context.annotation.Configuration;");
             out.println("import org.springframework.transaction.PlatformTransactionManager;");
@@ -138,6 +142,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(INDENT + "private final PlatformTransactionManager transactionManager;");
             out.println();
             out.println(INDENT + "@Bean");
+            out.println(INDENT + "@ConditionalOnProperty(name = \"spring.batch.job.enabled\", havingValue = \"false\", matchIfMissing = true)");
             out.println(INDENT + "public Job " + jobName + "(Step " + stepName + ") {");
             out.println(DOUBLE_INDENT + "log.info(\"Initializing batch job: {}\", \"" + jobName + "\");");
             out.println(DOUBLE_INDENT + "return new JobBuilder(\"" + jobName + "\", jobRepository)");
@@ -153,24 +158,17 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(TRIPLE_INDENT + "ItemWriter<" + wrapperClassName + "> writer,");
             out.println(TRIPLE_INDENT + "SkipListener<" + dtoClassName + ", " + wrapperClassName + "> skipListener) {");
             out.println(DOUBLE_INDENT + "log.info(\"Initializing batch step: {}\", \"" + stepName + "\");");
-            out.println(DOUBLE_INDENT + "var stepBuilder = new StepBuilder(\"" + stepName + "\", jobRepository)");
-            out.println(QUAD_INDENT + ".<" + dtoClassName + ", " + wrapperClassName + ">chunk(" + chunkSize + ", transactionManager)");
-            out.println(QUAD_INDENT + ".reader(reader)");
-            out.println(QUAD_INDENT + ".processor(processor)");
-            out.println(QUAD_INDENT + ".writer(writer)");
-            out.println(QUAD_INDENT + ".faultTolerant()");
-            out.println(QUAD_INDENT + ".skipLimit(" + skipLimit + ")");
-            out.println(QUAD_INDENT + ".skip(Exception.class)");
-            out.println(QUAD_INDENT + ".noRollback(Exception.class)");
-            out.println(QUAD_INDENT + ".listener(skipListener)");
-            if (enableRetry && retryableExceptions.length > 0) {
-                out.println(QUAD_INDENT + ".retryLimit(" + retryLimit + ")");
-                for (String exception : retryableExceptions) {
-                    out.println(QUAD_INDENT + ".retry(" + exception + ".class)");
-                }
-            }
-            out.println(QUAD_INDENT + ";");
-            out.println(DOUBLE_INDENT + "return stepBuilder.build();");
+            out.println(DOUBLE_INDENT + "var skipPolicy = new LimitCheckingExceptionHierarchySkipPolicy(");
+            out.println(TRIPLE_INDENT + "Set.of(Exception.class), " + skipLimit + ");");
+            out.println(DOUBLE_INDENT + "return new ChunkOrientedStepBuilder<" + dtoClassName + ", " + wrapperClassName + ">(\"" + stepName + "\", jobRepository, " + chunkSize + ")");
+            out.println(TRIPLE_INDENT + ".transactionManager(transactionManager)");
+            out.println(TRIPLE_INDENT + ".reader(reader)");
+            out.println(TRIPLE_INDENT + ".processor(processor)");
+            out.println(TRIPLE_INDENT + ".writer(writer)");
+            out.println(TRIPLE_INDENT + ".faultTolerant()");
+            out.println(TRIPLE_INDENT + ".skipPolicy(skipPolicy)");
+            out.println(TRIPLE_INDENT + ".listener(skipListener)");
+            out.println(TRIPLE_INDENT + ".build();");
             out.println(INDENT + "}");
             out.println("}");
         }
@@ -190,8 +188,9 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             }
             out.println("import " + dtoClassFqn + ";");
             out.println("import lombok.extern.slf4j.Slf4j;");
-            out.println("import org.springframework.batch.core.configuration.annotation.StepScope;");
-            out.println("import org.springframework.batch.item.ItemReader;");
+            out.println("import org.springframework.batch.infrastructure.item.ItemReader;");
+            out.println("import org.springframework.context.annotation.Scope;");
+            out.println("import org.springframework.context.annotation.ScopedProxyMode;");
             out.println("import org.springframework.beans.factory.annotation.Value;");
             out.println("import org.springframework.context.annotation.Bean;");
             out.println("import org.springframework.context.annotation.Configuration;");
@@ -202,7 +201,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("public class " + generatedClassName + " {");
             out.println();
             out.println(INDENT + "@Bean");
-            out.println(INDENT + "@StepScope");
+            out.println(INDENT + "@Scope(value = \"step\", proxyMode = ScopedProxyMode.TARGET_CLASS)");
             out.println(INDENT + "public ItemReader<" + dtoClassName + "> " + stepName + "ItemReader(");
             out.println(TRIPLE_INDENT + "@Value(\"#{jobParameters['filePath']}\") String filePath) {");
             out.println(DOUBLE_INDENT + "log.debug(\"Initializing " + fileType + " reader for file: {}\", filePath);");
@@ -230,7 +229,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import jakarta.validation.Validator;");
             out.println("import lombok.RequiredArgsConstructor;");
             out.println("import lombok.extern.slf4j.Slf4j;");
-            out.println("import org.springframework.batch.item.ItemProcessor;");
+            out.println("import org.springframework.batch.infrastructure.item.ItemProcessor;");
             out.println("import org.springframework.context.annotation.Bean;");
             out.println("import org.springframework.context.annotation.Configuration;");
             out.println("import java.util.List;");
@@ -282,8 +281,8 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import " + wrapperClassFqn + ";");
             out.println("import lombok.RequiredArgsConstructor;");
             out.println("import lombok.extern.slf4j.Slf4j;");
-            out.println("import org.springframework.batch.item.Chunk;");
-            out.println("import org.springframework.batch.item.ItemWriter;");
+            out.println("import org.springframework.batch.infrastructure.item.Chunk;");
+            out.println("import org.springframework.batch.infrastructure.item.ItemWriter;");
             out.println("import org.springframework.context.annotation.Bean;");
             out.println("import org.springframework.context.annotation.Configuration;");
             out.println("import java.util.List;");
@@ -324,7 +323,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import " + wrapperClassFqn + ";");
             out.println("import lombok.RequiredArgsConstructor;");
             out.println("import lombok.extern.slf4j.Slf4j;");
-            out.println("import org.springframework.batch.core.SkipListener;");
+            out.println("import org.springframework.batch.core.listener.SkipListener;");
             out.println("import org.springframework.lang.NonNull;");
             out.println("import org.springframework.stereotype.Component;");
             out.println("import static com.eazy.batch.utility.BatchUtility.addSkippedItem;");
