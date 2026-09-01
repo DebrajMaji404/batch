@@ -2,12 +2,14 @@ package com.eazy.batch.processor;
 
 import com.eazy.batch.annotation.BatchJob;
 import com.eazy.batch.enums.FileType;
+import com.eazy.batch.enums.ReaderType;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.annotation.processing.AbstractProcessor;
 import javax.annotation.processing.RoundEnvironment;
 import javax.annotation.processing.SupportedAnnotationTypes;
+import javax.annotation.processing.SupportedOptions;
 import javax.annotation.processing.SupportedSourceVersion;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.Element;
@@ -37,7 +39,13 @@ import java.util.Set;
  */
 @SupportedAnnotationTypes("com.eazy.batch.annotation.BatchJob")
 @SupportedSourceVersion(SourceVersion.RELEASE_21)
+@SupportedOptions(BatchJobAnnotationProcessor.SKIP_OPTION)
 public class BatchJobAnnotationProcessor extends AbstractProcessor {
+
+    // FIXED: this option was referenced from pom.xml's compiler args
+    // (-Aprocessor.skip.batchjob=true) but never actually read here, so it
+    // silently did nothing. It's now honored in process() below.
+    static final String SKIP_OPTION = "processor.skip.batchjob";
 
     private static final String INDENT = "    ";
     private static final String DOUBLE_INDENT = INDENT + INDENT;
@@ -46,6 +54,10 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
 
     @Override
     public boolean process(Set<? extends TypeElement> annotations, @NotNull RoundEnvironment roundEnv) {
+        if ("true".equalsIgnoreCase(processingEnv.getOptions().get(SKIP_OPTION))) {
+            logInfo("⏭️ Skipping @BatchJob annotation processing (-A" + SKIP_OPTION + "=true)");
+            return true;
+        }
         logInfo("Processing started");
         for (Element element : roundEnv.getElementsAnnotatedWith(BatchJob.class)) {
             if (element instanceof TypeElement typeElement) {
@@ -54,6 +66,11 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
                     logInfo("✅ Successfully generated batch configuration for: " + typeElement.getSimpleName());
                 } catch (IOException e) {
                     logError("❌ Failed to generate batch configuration: " + e.getMessage(), element);
+                } catch (IllegalArgumentException e) {
+                    // FIXED: validation failures previously escaped uncaught
+                    // here, producing a raw "exception occurred" stack trace
+                    // instead of a clean compiler error.
+                    logError("❌ Invalid @BatchJob configuration: " + e.getMessage(), element);
                 }
             }
         }
@@ -71,6 +88,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
         int chunkSize = annotation.chunkSize();
         int skipLimit = annotation.skipLimit();
         FileType fileType = annotation.fileType();
+        ReaderType readerType = annotation.readerType();
         String sheetName = annotation.sheetName();
         int sheetIndex = annotation.sheetIndex();
         boolean dryRun = annotation.dryRun();
@@ -85,7 +103,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
         String wrapperClassName = getSimpleName(wrapperClassFqn);
 
         // Validate and generate
-        validateConfiguration(jobName, stepName, dtoClassName, wrapperClassName, chunkSize, skipLimit);
+        validateConfiguration(jobName, stepName, dtoClassName, wrapperClassName, chunkSize, skipLimit, fileType, readerType);
         generateJobConfiguration(packageName, className, jobName, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn, chunkSize, skipLimit, enableRetry, retryLimit, retryableExceptions);
         generateReader(packageName, className, stepName, dtoClassName, dtoClassFqn, fileType, sheetName, sheetIndex);
         generateProcessor(packageName, className, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn, dryRun);
@@ -93,11 +111,26 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
         generateSkipListener(packageName, className, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn);
     }
 
-    private void validateConfiguration(String jobName, String stepName, String dtoClassName, String wrapperClassName, int chunkSize, int skipLimit) {
+    private void validateConfiguration(String jobName, String stepName, String dtoClassName, String wrapperClassName, int chunkSize, int skipLimit, FileType fileType, ReaderType readerType) {
         if (jobName == null || jobName.trim().isEmpty()) throw new IllegalArgumentException("jobName cannot be empty");
         if (stepName == null || stepName.trim().isEmpty()) throw new IllegalArgumentException("stepName cannot be empty");
-        if (chunkSize <= 0) throw new IllegalArgumentException("chunkSize must be positive");
-        if (skipLimit < 0) throw new IllegalArgumentException("skipLimit cannot be negative");
+        if (chunkSize != -1 && chunkSize <= 0) throw new IllegalArgumentException("chunkSize must be positive (or -1 to use eazy.batch.default-chunk-size)");
+        // FIXED: Spring Batch 6's LimitCheckingExceptionHierarchySkipPolicy
+        // (used below) throws "skipLimit must be greater than zero" at
+        // context-startup time if skipLimit is 0. The old check only
+        // rejected negative values, so skipLimit=0 passed compile-time
+        // validation here and then crashed the app at runtime.
+        if (skipLimit != -1 && skipLimit <= 0) throw new IllegalArgumentException("skipLimit must be greater than zero (or -1 to use eazy.batch.default-skip-limit)");
+        // FIXED: fail fast at compile time instead of silently generating the
+        // wrong reader (or one that doesn't exist) at runtime.
+        if (readerType != ReaderType.FILE) {
+            throw new IllegalArgumentException(
+                    "readerType=" + readerType + " is not implemented yet. Only ReaderType.FILE is currently supported.");
+        }
+        if (fileType != FileType.CSV && fileType != FileType.EXCEL) {
+            throw new IllegalArgumentException(
+                    "fileType=" + fileType + " is not implemented yet. Only FileType.CSV and FileType.EXCEL are currently supported.");
+        }
     }
 
     private void generateJobConfiguration(String packageName, String className, String jobName, String stepName, String dtoClassName, String wrapperClassName, String dtoClassFqn, String wrapperClassFqn, int chunkSize, int skipLimit, boolean enableRetry, int retryLimit, String[] retryableExceptions) throws IOException {
@@ -109,6 +142,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println();
             out.println("import " + dtoClassFqn + ";");
             out.println("import " + wrapperClassFqn + ";");
+            out.println("import com.eazy.batch.autoconfigure.BatchProcessorProperties;");
             out.println("import lombok.RequiredArgsConstructor;");
             out.println("import lombok.extern.slf4j.Slf4j;");
             out.println("import org.springframework.batch.core.job.Job;");
@@ -140,6 +174,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(INDENT + "private final JobRepository jobRepository;");
             out.println(INDENT + "private final PlatformTransactionManager transactionManager;");
             out.println(INDENT + "private final JobCompletionListener jobCompletionListener;");
+            out.println(INDENT + "private final BatchProcessorProperties batchProcessorProperties;");
             out.println();
             out.println(INDENT + "@Bean");
             out.println(INDENT + "public Job " + jobName + "(Step " + stepName + ") {");
@@ -157,10 +192,16 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(TRIPLE_INDENT + "ItemWriter<" + wrapperClassName + "> writer,");
             out.println(TRIPLE_INDENT + "SkipListener<" + dtoClassName + ", " + wrapperClassName + "> skipListener) {");
             out.println(DOUBLE_INDENT + "log.info(\"Initializing batch step: {}\", \"" + stepName + "\");");
+            out.println(DOUBLE_INDENT + "int effectiveChunkSize = " + (chunkSize == -1 ? "batchProcessorProperties.getDefaultChunkSize();" : chunkSize + ";"));
+            out.println(DOUBLE_INDENT + "int effectiveSkipLimit = " + (skipLimit == -1 ? "batchProcessorProperties.getDefaultSkipLimit();" : skipLimit + ";"));
             out.println(DOUBLE_INDENT + "var skipPolicy = new LimitCheckingExceptionHierarchySkipPolicy(");
-            out.println(TRIPLE_INDENT + "Set.of(Exception.class), " + skipLimit + ");");
-            out.println(DOUBLE_INDENT + "return new ChunkOrientedStepBuilder<" + dtoClassName + ", " + wrapperClassName + ">(\"" + stepName + "\", jobRepository, " + chunkSize + ")");
-            out.println(TRIPLE_INDENT + ".transactionManager(transactionManager)");
+            out.println(TRIPLE_INDENT + "Set.of(Exception.class), effectiveSkipLimit);");
+            // FIXED: ChunkOrientedStepBuilder has no (String, JobRepository, int)
+            // constructor - only (String, JobRepository, PlatformTransactionManager, int)
+            // and (JobRepository, PlatformTransactionManager, int). The old code
+            // called a non-existent 3-arg overload and then a separate
+            // .transactionManager(...) chain call, which would not compile.
+            out.println(DOUBLE_INDENT + "return new ChunkOrientedStepBuilder<" + dtoClassName + ", " + wrapperClassName + ">(\"" + stepName + "\", jobRepository, transactionManager, effectiveChunkSize)");
             out.println(TRIPLE_INDENT + ".reader(reader)");
             out.println(TRIPLE_INDENT + ".processor(processor)");
             out.println(TRIPLE_INDENT + ".writer(writer)");

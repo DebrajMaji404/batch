@@ -64,15 +64,19 @@ public @interface BatchJob {
 
     /**
      * Chunk size for batch processing
-     * Default is 100
+     * Default: -1, which means "use eazy.batch.default-chunk-size from
+     * application properties" (itself defaulting to 100). Set an explicit
+     * positive value here to override the property for this specific job.
      */
-    int chunkSize() default 100;
+    int chunkSize() default -1;
 
     /**
      * Skip limit for failed items
-     * Default is 10
+     * Default: -1, which means "use eazy.batch.default-skip-limit from
+     * application properties" (itself defaulting to 10). Set an explicit
+     * positive value here to override the property for this specific job.
      */
-    int skipLimit() default 10;
+    int skipLimit() default -1;
 
     /**
      * File type for input (Excel, CSV)

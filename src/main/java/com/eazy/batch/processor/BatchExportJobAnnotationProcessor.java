@@ -58,6 +58,9 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
                 } catch (IOException e) {
                     processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR,
                             "❌ Failed to generate export configuration: " + e.getMessage(), element);
+                } catch (IllegalArgumentException e) {
+                    processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR,
+                            "❌ Invalid @BatchExportJob configuration: " + e.getMessage(), element);
                 }
             }
         }
@@ -77,15 +80,27 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
         String entityClass      = getSimpleName(entityFqn);
         String sheetName        = ann.sheetName().isEmpty() ? ann.fileName() : ann.sheetName();
 
+        validateExportConfiguration(ann.jobName(), ann.stepName(), ann.chunkSize(), ann.skipLimit());
+
         generateJobConfig(pkg, className, ann.jobName(), ann.stepName(),
                 ann.chunkSize(), ann.skipLimit(), entityClass, entityFqn);
 
         generateReader(pkg, className, ann.stepName(), entityClass, entityFqn);
 
         generateWriter(pkg, className, ann.stepName(), entityClass, entityFqn,
-                ann.storageType(), ann.fileType(), ann.fileName(), sheetName);
+                ann.storageType(), ann.fileType(), ann.fileName(), sheetName, ann.localDirectory());
 
         generateStepListener(pkg, className, ann.stepName(), entityClass, entityFqn, ann.fileType());
+    }
+
+    private void validateExportConfiguration(String jobName, String stepName, int chunkSize, int skipLimit) {
+        if (jobName == null || jobName.trim().isEmpty()) throw new IllegalArgumentException("jobName cannot be empty");
+        if (stepName == null || stepName.trim().isEmpty()) throw new IllegalArgumentException("stepName cannot be empty");
+        if (chunkSize <= 0) throw new IllegalArgumentException("chunkSize must be positive");
+        // FIXED: like the @BatchJob skip policy, a skipLimit of 0 is rejected
+        // at runtime by Spring Batch's skip machinery ("skipLimit must be
+        // greater than zero") - catch it here instead at compile time.
+        if (skipLimit <= 0) throw new IllegalArgumentException("skipLimit must be greater than zero");
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -167,8 +182,8 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
             out.println("import jakarta.persistence.EntityManagerFactory;");
             out.println("import lombok.RequiredArgsConstructor;");
             out.println("import lombok.extern.slf4j.Slf4j;");
-            out.println("import org.springframework.batch.item.database.JpaCursorItemReader;");
-            out.println("import org.springframework.batch.item.database.builder.JpaCursorItemReaderBuilder;");
+            out.println("import org.springframework.batch.infrastructure.item.database.JpaCursorItemReader;");
+            out.println("import org.springframework.batch.infrastructure.item.database.builder.JpaCursorItemReaderBuilder;");
             out.println("import org.springframework.context.annotation.Bean;");
             out.println("import org.springframework.context.annotation.Configuration;");
             out.println();
@@ -204,12 +219,13 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
     private void generateWriter(String pkg, String className, String stepName,
                                 String entityClass, String entityFqn,
                                 StorageType storage, ExportFileType format,
-                                String fileName, String sheetName) throws IOException {
+                                String fileName, String sheetName, String localDirectory) throws IOException {
         String gen         = className + "ExportWriter";
         String writerClass = format == ExportFileType.CSV ? "CsvExportItemWriter" : "ExcelExportItemWriter";
         String writerType  = writerClass + "<" + entityClass + ">";
         String qualifier   = storage == StorageType.LOCAL ? "localExportStorage" : "customExportStorage";
         String ext         = format == ExportFileType.CSV ? ".csv" : ".xlsx";
+        boolean hasLocalDirOverride = storage == StorageType.LOCAL && localDirectory != null && !localDirectory.isBlank();
 
         try (PrintWriter out = new PrintWriter(
                 processingEnv.getFiler().createSourceFile(pkg + "." + gen).openWriter())) {
@@ -219,8 +235,12 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
             out.println("import " + entityFqn + ";");
             out.println("import com.eazy.batch.writer." + writerClass + ";");
             out.println("import com.eazy.batch.service.ExportStorageService;");
+            if (hasLocalDirOverride) {
+                out.println("import com.eazy.batch.service.LocalExportStorageService;");
+            }
             out.println("import lombok.RequiredArgsConstructor;");
             out.println("import lombok.extern.slf4j.Slf4j;");
+            out.println("import org.springframework.batch.core.configuration.annotation.StepScope;");
             out.println("import org.springframework.beans.factory.annotation.Qualifier;");
             out.println("import org.springframework.context.annotation.Bean;");
             out.println("import org.springframework.context.annotation.Configuration;");
@@ -239,8 +259,27 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
             out.println(I + "private final " + className + " delegate;");
             out.println();
             out.println(I + "@Bean");
-            out.println(I + "public " + writerType + " " + stepName + "ExportItemWriter(");
-            out.println(III + "@Qualifier(\"" + qualifier + "\") ExportStorageService storageService) {");
+            // FIXED: this bean was previously a plain singleton, constructed
+            // once at application startup. Both CsvExportItemWriter and
+            // ExcelExportItemWriter buffer the whole file in an instance
+            // field set in their constructor, so as a singleton: (1) the
+            // filename timestamp was frozen at startup forever, and (2)
+            // every job run after the first re-used the same never-cleared
+            // buffer, silently duplicating/corrupting the output on every
+            // subsequent execution. @StepScope gives each StepExecution a
+            // fresh instance.
+            out.println(I + "@StepScope");
+            if (hasLocalDirOverride) {
+                // Per-job localDirectory() override: bypass the shared
+                // "localExportStorage" bean and build a dedicated instance,
+                // since localDirectory() was previously declared but never
+                // actually read anywhere.
+                out.println(I + "public " + writerType + " " + stepName + "ExportItemWriter() {");
+                out.println(II + "ExportStorageService storageService = new LocalExportStorageService(\"" + localDirectory.replace("\"", "\\\"") + "\");");
+            } else {
+                out.println(I + "public " + writerType + " " + stepName + "ExportItemWriter(");
+                out.println(III + "@Qualifier(\"" + qualifier + "\") ExportStorageService storageService) {");
+            }
             out.println();
             out.println(II + "String timestamp = LocalDateTime.now()");
             out.println(III + ".format(DateTimeFormatter.ofPattern(\"yyyyMMdd_HHmmss\"));");
@@ -289,8 +328,8 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
             out.println("import lombok.RequiredArgsConstructor;");
             out.println("import lombok.extern.slf4j.Slf4j;");
             out.println("import org.springframework.batch.core.ExitStatus;");
-            out.println("import org.springframework.batch.core.StepExecution;");
-            out.println("import org.springframework.batch.core.StepExecutionListener;");
+            out.println("import org.springframework.batch.core.step.StepExecution;");
+            out.println("import org.springframework.batch.core.listener.StepExecutionListener;");
             out.println("import org.springframework.lang.NonNull;");
             out.println("import org.springframework.stereotype.Component;");
             out.println();

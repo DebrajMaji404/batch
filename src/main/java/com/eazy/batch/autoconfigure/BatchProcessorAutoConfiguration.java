@@ -3,13 +3,18 @@ package com.eazy.batch.autoconfigure;
 import com.eazy.batch.listener.JobCompletionListener;
 import com.eazy.batch.service.BatchCleanupService;
 import com.eazy.batch.service.EmailNotificationService;
+import com.eazy.batch.service.ExportStorageService;
+import com.eazy.batch.service.LocalExportStorageService;
 import com.eazy.batch.service.MetricsService;
 import com.eazy.batch.service.ProgressTrackingService;
+import com.eazy.batch.utility.BatchUtility;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.validation.Validator;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
 import org.springframework.batch.core.launch.support.TaskExecutorJobLauncher;
 import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -47,6 +52,10 @@ public class BatchProcessorAutoConfiguration {
         this.properties = properties;
         log.info("✅ Batch Processor Auto-Configuration initialized");
         log.info("📋 Configuration: {}", properties);
+
+        // FIXED: cleanupAfterHours was previously ignored (TTL was hardcoded
+        // to 24h in BatchUtility). Push the configured value into the cache.
+        BatchUtility.configureCleanupTtl(properties.getCleanupAfterHours());
     }
 
     /**
@@ -124,13 +133,16 @@ public class BatchProcessorAutoConfiguration {
     }
 
     /**
-     * Default Job completion listener
+     * Default Job completion listener.
+     * FIXED: now depends on MetricsService, which is therefore always
+     * registered below (not conditional) so this wiring never fails
+     * regardless of whether metrics are actually enabled.
      */
     @Bean
     @ConditionalOnMissingBean(JobCompletionListener.class)
-    public JobCompletionListener jobCompletionListener() {
+    public JobCompletionListener jobCompletionListener(MetricsService metricsService) {
         log.info("✅ Default JobCompletionListener registered");
-        return new JobCompletionListener();
+        return new JobCompletionListener(metricsService);
     }
 
     /**
@@ -158,13 +170,19 @@ public class BatchProcessorAutoConfiguration {
     }
 
     /**
-     * Metrics service for monitoring
+     * Metrics service for monitoring.
+     * FIXED: now always registered (JobCompletionListener and generated
+     * per-job code depend on it unconditionally), with metrics-enabled
+     * governing whether it actually records anything internally, and
+     * MeterRegistry now properly injected via ObjectProvider (previously
+     * always null - it was constructed with `new MetricsService()`).
      */
     @Bean
-    @ConditionalOnProperty(prefix = "eazy.batch", name = "metrics-enabled", havingValue = "true")
-    public MetricsService metricsService() {
-        log.info("✅ Metrics Service enabled");
-        return new MetricsService();
+    @ConditionalOnMissingBean(MetricsService.class)
+    public MetricsService metricsService(ObjectProvider<MeterRegistry> meterRegistryProvider) {
+        boolean enabled = properties.isMetricsEnabled();
+        log.info("✅ Metrics Service registered (enabled={})", enabled);
+        return new MetricsService(meterRegistryProvider.getIfAvailable(), enabled);
     }
 
     /**
@@ -179,14 +197,35 @@ public class BatchProcessorAutoConfiguration {
     }
 
     /**
-     * Email notification service
+     * Email notification service.
+     * FIXED: now always registered (a generated per-job NotificationListener
+     * can depend on it whenever notifyOnCompletion/notifyOnFailure is set on
+     * @BatchJob), with email-notifications-enabled governing whether it
+     * actually sends anything internally.
      */
     @Bean
-    @ConditionalOnProperty(prefix = "eazy.batch", name = "email-notifications-enabled", havingValue = "true")
+    @ConditionalOnMissingBean(EmailNotificationService.class)
     public EmailNotificationService emailNotificationService() {
-        log.info("✅ Email Notification Service enabled (SMTP: {}:{})",
+        log.info("✅ Email Notification Service registered (enabled={}, SMTP: {}:{})",
+                properties.isEmailNotificationsEnabled(),
                 properties.getSmtpHost(),
                 properties.getSmtpPort());
         return new EmailNotificationService(properties);
+    }
+
+    /**
+     * Local export storage - the built-in target for
+     * @BatchExportJob(storageType = StorageType.LOCAL).
+     * FIXED: previously a component-scanned @Service with only a no-arg
+     * constructor, so eazy.batch.export.local-directory had no effect and
+     * every LOCAL export always went to the system temp directory.
+     */
+    @Bean("localExportStorage")
+    @ConditionalOnMissingBean(name = "localExportStorage")
+    public ExportStorageService localExportStorage() {
+        String dir = properties.getExportLocalDirectory();
+        log.info("✅ Local export storage registered (directory={})",
+                (dir == null || dir.isBlank()) ? "<system temp dir>" : dir);
+        return new LocalExportStorageService(dir);
     }
 }

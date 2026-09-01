@@ -1,13 +1,13 @@
 package com.eazy.batch.listener;
 
 import com.eazy.batch.dto.BatchSkippedItem;
+import com.eazy.batch.service.MetricsService;
 import com.eazy.batch.utility.BatchUtility;
 import lombok.extern.slf4j.Slf4j;
 import org.jetbrains.annotations.NotNull;
 import org.springframework.batch.core.BatchStatus;
 import org.springframework.batch.core.job.JobExecution;
 import org.springframework.batch.core.listener.JobExecutionListener;
-import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -15,12 +15,21 @@ import java.time.ZoneOffset;
 import java.util.List;
 
 /**
- * Job completion listener to log job execution details
+ * Job completion listener to log job execution details.
+ * Registered exclusively via BatchProcessorAutoConfiguration#jobCompletionListener
+ * and attached directly to every generated Job - intentionally NOT annotated
+ * with @Component; see MetricsService for why.
  * FIXED: Execution time calculation now works properly
+ * FIXED: now records metrics via MetricsService when it's active
  */
 @Slf4j
-@Component
 public class JobCompletionListener implements JobExecutionListener {
+
+    private final MetricsService metricsService;
+
+    public JobCompletionListener(MetricsService metricsService) {
+        this.metricsService = metricsService;
+    }
 
     @Override
     public void beforeJob(@NotNull JobExecution jobExecution) {
@@ -53,8 +62,10 @@ public class JobCompletionListener implements JobExecutionListener {
         // Status-specific logging
         if (status == BatchStatus.COMPLETED) {
             log.info("✅ Job '{}' completed successfully", jobName);
+            metricsService.recordJobSuccess(jobName);
         } else if (status == BatchStatus.FAILED) {
             log.error("❌ Job '{}' failed", jobName);
+            metricsService.recordJobFailure(jobName);
             if (jobExecution.getAllFailureExceptions() != null &&
                     !jobExecution.getAllFailureExceptions().isEmpty()) {
                 log.error("Failure reasons:");
@@ -67,6 +78,8 @@ public class JobCompletionListener implements JobExecutionListener {
         } else {
             log.info("Job '{}' ended with status: {}", jobName, status);
         }
+
+        metricsService.recordJobDuration(jobName, duration);
 
         // Execution statistics
         log.info("📊 Execution Statistics:");

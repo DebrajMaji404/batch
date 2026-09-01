@@ -1,39 +1,41 @@
 package com.eazy.batch.service;
 
-// MetricsService.java
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Service for collecting batch processing metrics
+ * Service for collecting batch processing metrics.
+ * Registered exclusively via BatchProcessorAutoConfiguration#metricsService -
+ * intentionally NOT annotated with @Service, since this package sits under
+ * com.eazy.batch and would otherwise get double-registered by component
+ * scanning whenever a consumer's base package covers com.eazy.batch (e.g.
+ * this module's own BatchApplication).
  */
 @Slf4j
-@Service
 public class MetricsService {
 
     private final MeterRegistry meterRegistry;
+    private final boolean enabled;
     private final ConcurrentHashMap<String, Counter> itemCounters = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Counter> skipCounters = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Timer> jobTimers = new ConcurrentHashMap<>();
 
-    @Autowired(required = false)
-    public MetricsService(MeterRegistry meterRegistry) {
+    public MetricsService(MeterRegistry meterRegistry, boolean enabled) {
         this.meterRegistry = meterRegistry;
+        this.enabled = enabled;
     }
 
-    public MetricsService() {
-        this.meterRegistry = null;
+    private boolean isActive() {
+        return enabled && meterRegistry != null;
     }
 
     public void recordItemProcessed(String jobName) {
-        if (meterRegistry == null) return;
+        if (!isActive()) return;
 
         itemCounters.computeIfAbsent(jobName, name ->
                 Counter.builder("batch.items.processed")
@@ -44,7 +46,7 @@ public class MetricsService {
     }
 
     public void recordItemSkipped(String jobName, String phase) {
-        if (meterRegistry == null) return;
+        if (!isActive()) return;
 
         skipCounters.computeIfAbsent(jobName + "_" + phase, key ->
                 Counter.builder("batch.items.skipped")
@@ -56,7 +58,7 @@ public class MetricsService {
     }
 
     public void recordJobDuration(String jobName, Duration duration) {
-        if (meterRegistry == null) return;
+        if (!isActive()) return;
 
         jobTimers.computeIfAbsent(jobName, name ->
                 Timer.builder("batch.job.duration")
@@ -67,7 +69,7 @@ public class MetricsService {
     }
 
     public void recordJobSuccess(String jobName) {
-        if (meterRegistry == null) return;
+        if (!isActive()) return;
 
         Counter.builder("batch.job.success")
                 .tag("job", jobName)
@@ -77,7 +79,7 @@ public class MetricsService {
     }
 
     public void recordJobFailure(String jobName) {
-        if (meterRegistry == null) return;
+        if (!isActive()) return;
 
         Counter.builder("batch.job.failure")
                 .tag("job", jobName)

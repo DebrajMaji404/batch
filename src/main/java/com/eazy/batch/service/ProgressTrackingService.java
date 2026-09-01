@@ -1,28 +1,31 @@
 package com.eazy.batch.service;
 
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Service;
 
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Service for tracking batch job progress
+ * Service for tracking batch job progress.
+ * Registered exclusively via BatchProcessorAutoConfiguration#progressTrackingService -
+ * intentionally NOT annotated with @Service; see MetricsService for why.
  */
 @Slf4j
-@Service
 public class ProgressTrackingService {
 
     private final int updateInterval;
     private final ConcurrentHashMap<Long, ProgressInfo> progressMap = new ConcurrentHashMap<>();
 
     public ProgressTrackingService(int updateInterval) {
-        this.updateInterval = updateInterval;
+        // FIXED: guard against a misconfigured (zero or negative) interval,
+        // which previously caused an ArithmeticException (divide by zero) in
+        // updateProgress()'s modulo check.
+        this.updateInterval = updateInterval > 0 ? updateInterval : 100;
     }
 
     public void initProgress(Long jobExecutionId, long totalItems) {
         progressMap.put(jobExecutionId, new ProgressInfo(totalItems));
         log.info("Progress tracking initialized for job {}: {} total items",
-                jobExecutionId, totalItems);
+                jobExecutionId, totalItems > 0 ? totalItems : "unknown");
     }
 
     public void updateProgress(Long jobExecutionId, long processedItems) {
@@ -33,11 +36,18 @@ public class ProgressTrackingService {
 
         // Only log at intervals
         if (processedItems % updateInterval == 0) {
-            double percentage = info.totalItems > 0
-                    ? (double) processedItems / info.totalItems * 100
-                    : 0;
-            log.info("Job {} progress: {}/{} ({:.2f}%)",
-                    jobExecutionId, processedItems, info.totalItems, percentage);
+            if (info.totalItems > 0) {
+                double percentage = (double) processedItems / info.totalItems * 100;
+                // FIXED: SLF4J only supports bare "{}" placeholders, not
+                // String.format-style specifiers like "{:.2f}" - that text
+                // was being printed literally and the percentage argument
+                // silently dropped. Pre-format the value instead.
+                log.info("Job {} progress: {}/{} ({}%)",
+                        jobExecutionId, processedItems, info.totalItems,
+                        String.format("%.2f", percentage));
+            } else {
+                log.info("Job {} progress: {} items processed", jobExecutionId, processedItems);
+            }
         }
     }
 

@@ -1,7 +1,6 @@
 package com.eazy.batch.service;
 
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Service;
 
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -18,22 +17,18 @@ import java.nio.file.StandardOpenOption;
  *
  * <h3>Configuration (application.properties):</h3>
  * <pre>
- * batch.export.local.directory=/var/exports
+ * eazy.batch.export.local-directory=/var/exports
  * </pre>
  *
- * <p>If {@code directory} is not set, the system temp directory is used.</p>
+ * <p>If not set, the system temp directory is used.</p>
  *
- * <p>Register this bean when {@code storageType = StorageType.LOCAL}:</p>
- * <pre>{@code
- * @Bean
- * @Primary
- * public ExportStorageService exportStorageService() {
- *     return new LocalExportStorageService("/var/exports");
- * }
- * }</pre>
+ * Registered exclusively via BatchProcessorAutoConfiguration#localExportStorage -
+ * intentionally NOT annotated with @Service; see MetricsService for why.
+ * FIXED: was previously @Service("localExportStorage") with only a no-arg
+ * constructor, so the directory was always the system temp dir regardless of
+ * any configuration - there was no way to point it anywhere else globally.
  */
 @Slf4j
-@Service("localExportStorage")
 public class LocalExportStorageService implements ExportStorageService {
 
     private final String directory;
@@ -43,7 +38,9 @@ public class LocalExportStorageService implements ExportStorageService {
     }
 
     public LocalExportStorageService(String directory) {
-        this.directory = directory;
+        this.directory = (directory == null || directory.isBlank())
+                ? System.getProperty("java.io.tmpdir")
+                : directory;
     }
 
     @Override

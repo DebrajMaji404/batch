@@ -5,15 +5,15 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.mail.SimpleMailMessage;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.mail.javamail.JavaMailSenderImpl;
-import org.springframework.stereotype.Service;
 
 import java.util.Properties;
 
 /**
- * Service for sending email notifications
+ * Service for sending email notifications.
+ * Registered exclusively via BatchProcessorAutoConfiguration#emailNotificationService -
+ * intentionally NOT annotated with @Service; see MetricsService for why.
  */
 @Slf4j
-@Service
 public class EmailNotificationService {
 
     private final JavaMailSender mailSender;

@@ -1,5 +1,7 @@
 package com.eazy.batch.model;
 
+import lombok.extern.slf4j.Slf4j;
+
 import java.util.function.Function;
 
 /**
@@ -19,6 +21,7 @@ import java.util.function.Function;
  *
  * @param <T> Entity type being exported
  */
+@Slf4j
 public class ExportColumn<T> {
 
     private final String header;
@@ -51,6 +54,11 @@ public class ExportColumn<T> {
             Object value = valueExtractor.apply(entity);
             return value != null ? value : "";
         } catch (Exception e) {
+            // FIXED: this was a completely silent catch-all, so a broken
+            // extractor (e.g. a NullPointerException on a nested
+            // e.getManager().getEmail()) just produced blank cells with zero
+            // trace of why. Now at least visible at debug level.
+            log.debug("Failed to extract value for column '{}': {}", header, e.getMessage());
             return "";  // safe fallback if nested value is null (e.g. e.getManager() is null)
         }
     }

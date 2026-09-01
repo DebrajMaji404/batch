@@ -112,4 +112,11 @@ public class BatchProcessorProperties {
      * Enable dry run mode globally
      */
     private boolean dryRunMode = false;
+
+    /**
+     * Default local directory for @BatchExportJob(storageType = LOCAL) output
+     * when the job itself doesn't set localDirectory(). Falls back to the
+     * system temp directory if left blank.
+     */
+    private String exportLocalDirectory = "";
 }

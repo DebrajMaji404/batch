@@ -3,6 +3,7 @@ package com.eazy.batch.utility;
 import com.eazy.batch.dto.BatchSkippedItem;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.Expiry;
 import lombok.extern.slf4j.Slf4j;
 import org.jetbrains.annotations.Contract;
 import org.jetbrains.annotations.NotNull;
@@ -16,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Utility class for batch operations
@@ -25,15 +27,55 @@ import java.util.concurrent.TimeUnit;
 public class BatchUtility {
 
     /**
+     * FIXED: cleanupAfterHours from eazy.batch.cleanup-after-hours was
+     * previously ignored - the TTL below was hardcoded to 24 hours. It's now
+     * read dynamically on every entry via Expiry, and can be changed at
+     * runtime with configureCleanupTtl(), which BatchProcessorAutoConfiguration
+     * calls once at startup with the configured property value.
+     */
+    private static final AtomicLong ttlNanos = new AtomicLong(TimeUnit.HOURS.toNanos(24));
+
+    /**
      * Store skipped items per job execution ID with automatic expiration
      * FIXED: Using Caffeine cache to prevent memory leaks
      */
     private static final Cache<Long, List<BatchSkippedItem<?>>> skippedItemsByJobId =
             Caffeine.newBuilder()
-                    .expireAfterWrite(24, TimeUnit.HOURS)
+                    .expireAfter(new Expiry<Long, List<BatchSkippedItem<?>>>() {
+                        @Override
+                        public long expireAfterCreate(@NotNull Long key, @NotNull List<BatchSkippedItem<?>> value, long currentTime) {
+                            return ttlNanos.get();
+                        }
+
+                        @Override
+                        public long expireAfterUpdate(@NotNull Long key, @NotNull List<BatchSkippedItem<?>> value, long currentTime, long currentDuration) {
+                            return currentDuration;
+                        }
+
+                        @Override
+                        public long expireAfterRead(@NotNull Long key, @NotNull List<BatchSkippedItem<?>> value, long currentTime, long currentDuration) {
+                            return currentDuration;
+                        }
+                    })
                     .maximumSize(1000)
                     .recordStats()
                     .build();
+
+    /**
+     * Configure how long skipped-item data is retained before automatic
+     * expiration. Intended to be called once at application startup from
+     * eazy.batch.cleanup-after-hours.
+     *
+     * @param hours Hours to retain data for (values <= 0 are ignored)
+     */
+    public static void configureCleanupTtl(int hours) {
+        if (hours <= 0) {
+            log.warn("Ignoring invalid cleanup-after-hours value: {}. Keeping current TTL.", hours);
+            return;
+        }
+        ttlNanos.set(TimeUnit.HOURS.toNanos(hours));
+        log.info("Skipped-item cache TTL configured to {} hour(s)", hours);
+    }
 
     /**
      * Get the current job execution ID from StepSynchronizationManager
@@ -214,9 +256,13 @@ public class BatchUtility {
 
     /**
      * Clean up old job data
-     * FIXED: Now actually cleans up old data
+     * FIXED: TTL is now driven by configureCleanupTtl() / eazy.batch.cleanup-after-hours
+     * instead of the previously-hardcoded 24h. This method just forces Caffeine
+     * to proactively evict anything past that TTL rather than waiting for it
+     * to happen lazily on next access.
      *
-     * @param olderThanHours Remove data older than this many hours
+     * @param olderThanHours Unused - retained for backward source compatibility.
+     *                        The actual retention window is set once via configureCleanupTtl().
      */
     public static void cleanupOldJobData(int olderThanHours) {
         skippedItemsByJobId.cleanUp();
@@ -277,6 +323,11 @@ public class BatchUtility {
                     failedEntities.add(entityInfo);
                     log.error("❌ Failed to save entity: {} - Error: {}",
                             entityInfo, ex.getMessage());
+                    // FIXED: record the failure through the same skip-tracking
+                    // mechanism used by the SkipListener, since this failure
+                    // happens inside the writer's business logic and can never
+                    // reach Spring Batch's own onSkipInWrite callback.
+                    addSkippedItem(entity, "WRITE", ex.getMessage());
                 }
             }
 
