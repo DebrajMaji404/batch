@@ -15,7 +15,7 @@ import java.util.List;
  *     jobName       = "exportEmployeeJob",
  *     stepName      = "exportEmployeeStep",
  *     entityClass   = Employee.class,
- *     storageType   = StorageType.S3,
+ *     storageType   = StorageType.LOCAL,
  *     fileName      = "employees"
  * )
  * public class EmployeeExportConfig implements SimpleExportProcessor<Employee> {
@@ -82,12 +82,11 @@ public interface SimpleExportProcessor<ENTITY> {
      *
      * <p>Use this to send notifications, update a DB record, trigger a webhook, etc.</p>
      *
-     * @param fileUrl The URL or path where the file was saved
-     *                <ul>
-     *                  <li>LOCAL → absolute file path e.g. {@code /exports/employees_20240101.xlsx}</li>
-     *                  <li>S3    → pre-signed or public S3 URL</li>
-     *                  <li>FIREBASE → Firebase Storage download URL</li>
-     *                </ul>
+     * @param fileUrl The URL or path where the file was saved. For the built-in LOCAL
+     *                storage this is an absolute file path (e.g.
+     *                {@code /exports/employees_20240101.xlsx}); for a CUSTOM
+     *                {@link com.eazy.batch.service.ExportStorageService} it's whatever
+     *                URL string your implementation returns.
      */
     default void onSaveComplete(String fileUrl) {
         // Override to add custom post-save logic

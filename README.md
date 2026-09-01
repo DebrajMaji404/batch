@@ -725,6 +725,10 @@ way:
   `ExportStorageService` yourself for anything else (see above).
 - **No retry/notifications for `@BatchExportJob`** — `enableRetry`/`notifyOnCompletion` etc.
   exist on `@BatchJob` with no equivalent on `@BatchExportJob` yet.
+- **`CustomJobCompletionListener` is not auto-wired.** Implementing it and registering it as
+  a bean does nothing on its own — every generated `Job` wires in exactly one concrete
+  `JobCompletionListener`, not a list of listeners. To customize completion behavior, override
+  `JobCompletionListener` itself (see "Overriding the default `JobCompletionListener`" above).
 
 If you need any of these, open an issue (or a PR) — the annotation processor architecture
 makes most of them additive rather than invasive to add.

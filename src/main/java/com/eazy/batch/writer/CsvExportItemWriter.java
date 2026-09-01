@@ -6,8 +6,14 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.batch.infrastructure.item.Chunk;
 import org.springframework.batch.infrastructure.item.ItemWriter;
 
-import java.io.ByteArrayInputStream;
-import java.io.StringWriter;
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -17,6 +23,14 @@ import java.util.stream.Collectors;
  *
  * <p>Columns are defined via {@link ExportColumn} using method references —
  * no raw SQL rowMappers needed.</p>
+ *
+ * <p>NEW: rows are written straight to a temp file on disk as each chunk
+ * arrives, rather than accumulated in an in-memory StringBuilder/StringWriter.
+ * Only the temp file's contents are streamed to storage once, in
+ * {@link #finalizeAndSave()}, and the temp file is deleted afterward - so a
+ * very large export no longer holds its entire CSV content in heap memory at
+ * once (the same class of fix already applied to
+ * {@link ExcelExportItemWriter} via POI's streaming SXSSFWorkbook).</p>
  *
  * @param <T> Entity type to export
  */
@@ -31,7 +45,8 @@ public class CsvExportItemWriter<T> implements ItemWriter<T> {
     private final Consumer<String> onSaveComplete;
     private final Consumer<Throwable> onSaveFailure;
 
-    private final StringWriter buffer = new StringWriter();
+    private final Path tempFile;
+    private final BufferedWriter writer;
     private int rowCount = 0;
 
     public CsvExportItemWriter(List<ExportColumn<T>> columns,
@@ -45,26 +60,34 @@ public class CsvExportItemWriter<T> implements ItemWriter<T> {
         this.onSaveComplete = onSaveComplete;
         this.onSaveFailure = onSaveFailure;
 
-        writeHeaderRow();
+        try {
+            this.tempFile = Files.createTempFile("eazy-batch-export-", ".csv");
+            this.writer = new BufferedWriter(new OutputStreamWriter(
+                    Files.newOutputStream(tempFile, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING),
+                    StandardCharsets.UTF_8));
+            writeHeaderRow();
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to create temp file for CSV export: " + e.getMessage(), e);
+        }
     }
 
-    private void writeHeaderRow() {
+    private void writeHeaderRow() throws IOException {
         String header = columns.stream()
                 .map(ExportColumn::getHeader)
                 .map(this::escapeCsv)
                 .collect(Collectors.joining(","));
-        buffer.write(header);
-        buffer.write("\n");
+        writer.write(header);
+        writer.write("\n");
     }
 
     @Override
-    public void write(Chunk<? extends T> chunk) {
+    public void write(Chunk<? extends T> chunk) throws IOException {
         for (T entity : chunk) {
             String row = columns.stream()
                     .map(col -> escapeCsv(String.valueOf(col.getValue(entity))))
                     .collect(Collectors.joining(","));
-            buffer.write(row);
-            buffer.write("\n");
+            writer.write(row);
+            writer.write("\n");
             rowCount++;
         }
         log.debug("Wrote {} rows (total: {})", chunk.size(), rowCount);
@@ -79,20 +102,31 @@ public class CsvExportItemWriter<T> implements ItemWriter<T> {
     }
 
     /**
-     * Serialize CSV to bytes, upload to storage, fire callback.
+     * Flushes the temp file, streams it to storage, fires the callback, then
+     * always deletes the temp file (success or failure) so nothing is leaked.
      */
     public void finalizeAndSave() {
         try {
-            byte[] bytes = buffer.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            log.info("Saving CSV file: {} ({} rows, {} bytes)", fileName, rowCount, bytes.length);
+            writer.flush();
+            writer.close();
 
-            String url = storageService.save(new ByteArrayInputStream(bytes), fileName, CONTENT_TYPE);
-            log.info("Export saved successfully. URL: {}", url);
-            onSaveComplete.accept(url);
+            long bytes = Files.size(tempFile);
+            log.info("Saving CSV file: {} ({} rows, {} bytes)", fileName, rowCount, bytes);
 
+            try (InputStream inputStream = Files.newInputStream(tempFile)) {
+                String url = storageService.save(inputStream, fileName, CONTENT_TYPE);
+                log.info("Export saved successfully. URL: {}", url);
+                onSaveComplete.accept(url);
+            }
         } catch (Exception e) {
             log.error("Failed to save CSV export: {}", e.getMessage(), e);
             onSaveFailure.accept(e);
+        } finally {
+            try {
+                Files.deleteIfExists(tempFile);
+            } catch (IOException e) {
+                log.warn("Failed to delete temp CSV export file {}: {}", tempFile, e.getMessage());
+            }
         }
     }
 }

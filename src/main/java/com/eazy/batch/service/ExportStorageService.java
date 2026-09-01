@@ -5,15 +5,13 @@ import java.io.InputStream;
 /**
  * Strategy interface for saving exported files to a storage destination.
  *
- * <p>Three built-in implementations are provided:</p>
- * <ul>
- *   <li>{@code LocalExportStorageService}  — saves to local disk</li>
- *   <li>{@code S3ExportStorageService}     — uploads to AWS S3</li>
- *   <li>{@code FirebaseExportStorageService} — uploads to Firebase Storage</li>
- * </ul>
+ * <p>Only {@code LocalExportStorageService} (disk) ships built in. For anything
+ * else - S3, Firebase Storage, GCS, FTP, etc. - implement this interface
+ * yourself and register it as a {@code @Bean("customExportStorage")}; see
+ * {@link com.eazy.batch.enums.StorageType#CUSTOM}.</p>
  *
- * <p>All implementations return a URL/path string after saving, which is then
- * passed to {@code SimpleExportProcessor.onSaveComplete(String url)}.</p>
+ * <p>Whatever implementation is used, it returns a URL/path string after
+ * saving, which is then passed to {@code SimpleExportProcessor.onSaveComplete(String url)}.</p>
  */
 public interface ExportStorageService {
 
@@ -23,12 +21,9 @@ public interface ExportStorageService {
      * @param inputStream File content as stream
      * @param fileName    Full file name including extension, e.g. "employees_20240101.xlsx"
      * @param contentType MIME type, e.g. "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-     * @return URL or path where the file was saved:
-     *         <ul>
-     *           <li>LOCAL    → absolute file path</li>
-     *           <li>S3       → public or pre-signed URL</li>
-     *           <li>FIREBASE → download URL</li>
-     *         </ul>
+     * @return URL or path where the file was saved (e.g. an absolute file path for the
+     *         built-in LOCAL implementation, or whatever URL scheme your own CUSTOM
+     *         implementation returns)
      * @throws Exception if saving fails
      */
     String save(InputStream inputStream, String fileName, String contentType) throws Exception;
