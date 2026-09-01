@@ -95,6 +95,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
         boolean enableRetry = annotation.enableRetry();
         int retryLimit = annotation.retryLimit();
         String[] retryableExceptions = annotation.retryableExceptions();
+        boolean cacheValidation = annotation.cacheValidation();
 
         // Extract class names
         String dtoClassFqn = getClassFqn(annotation, "dtoClass");
@@ -106,7 +107,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
         validateConfiguration(jobName, stepName, dtoClassName, wrapperClassName, chunkSize, skipLimit, fileType, readerType);
         generateJobConfiguration(packageName, className, jobName, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn, chunkSize, skipLimit, enableRetry, retryLimit, retryableExceptions);
         generateReader(packageName, className, stepName, dtoClassName, dtoClassFqn, fileType, sheetName, sheetIndex);
-        generateProcessor(packageName, className, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn, dryRun);
+        generateProcessor(packageName, className, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn, dryRun, cacheValidation);
         generateWriter(packageName, className, stepName, wrapperClassName, wrapperClassFqn, dryRun);
         generateSkipListener(packageName, className, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn);
     }
@@ -262,7 +263,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
         }
     }
 
-    private void generateProcessor(String packageName, String className, String stepName, String dtoClassName, String wrapperClassName, String dtoClassFqn, String wrapperClassFqn, boolean dryRun) throws IOException {
+    private void generateProcessor(String packageName, String className, String stepName, String dtoClassName, String wrapperClassName, String dtoClassFqn, String wrapperClassFqn, boolean dryRun, boolean cacheValidation) throws IOException {
         String generatedClassName = className + "Processor";
         JavaFileObject file = processingEnv.getFiler().createSourceFile(packageName + "." + generatedClassName);
 
@@ -271,6 +272,8 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println();
             out.println("import " + dtoClassFqn + ";");
             out.println("import " + wrapperClassFqn + ";");
+            out.println("import com.github.benmanes.caffeine.cache.Cache;");
+            out.println("import com.github.benmanes.caffeine.cache.Caffeine;");
             out.println("import jakarta.validation.ConstraintViolation;");
             out.println("import jakarta.validation.Validator;");
             out.println("import lombok.RequiredArgsConstructor;");
@@ -289,6 +292,18 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println();
             out.println(INDENT + "private final " + className + " delegate;");
             out.println(INDENT + "private final Validator validator;");
+            if (cacheValidation) {
+                // NEW: chunk/job-scoped validation result cache. Real-world
+                // input files often contain repeated rows or repeated
+                // lookup values - re-running Jakarta's reflection-based
+                // validator.validate() on identical content is wasted work.
+                // Keyed by dto.toString(), so this relies on a
+                // content-reflecting toString() (e.g. Lombok's @Data) -
+                // disable via @BatchJob(cacheValidation = false) if your
+                // DTO's toString() doesn't reflect its full field content.
+                out.println(INDENT + "private final Cache<String, Set<ConstraintViolation<" + dtoClassName + ">>> validationCache =");
+                out.println(DOUBLE_INDENT + "Caffeine.newBuilder().maximumSize(10_000).build();");
+            }
             out.println();
             out.println(INDENT + "@Bean");
             out.println(INDENT + "public ItemProcessor<" + dtoClassName + ", " + wrapperClassName + "> " + stepName + "ItemProcessor() {");
@@ -296,7 +311,13 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(TRIPLE_INDENT + "if (dto == null) { log.warn(\"Received null DTO\"); return null; }");
             out.println(TRIPLE_INDENT + "dto = delegate.preProcess(dto);");
             out.println(TRIPLE_INDENT + "if (!delegate.shouldProcess(dto)) { log.debug(\"Item filtered: {}\", delegate.getIdentifier(dto)); return null; }");
-            out.println(TRIPLE_INDENT + "Set<ConstraintViolation<" + dtoClassName + ">> violations = validator.validate(dto);");
+            if (cacheValidation) {
+                out.println(TRIPLE_INDENT + "final " + dtoClassName + " dtoForValidation = dto;");
+                out.println(TRIPLE_INDENT + "Set<ConstraintViolation<" + dtoClassName + ">> violations = validationCache.get(");
+                out.println(QUAD_INDENT + "dtoForValidation.toString(), key -> validator.validate(dtoForValidation));");
+            } else {
+                out.println(TRIPLE_INDENT + "Set<ConstraintViolation<" + dtoClassName + ">> violations = validator.validate(dto);");
+            }
             out.println(TRIPLE_INDENT + "if (!violations.isEmpty()) {");
             out.println(QUAD_INDENT + "String errors = violations.stream().map(v -> v.getPropertyPath() + \": \" + v.getMessage()).collect(Collectors.joining(\", \"));");
             out.println(QUAD_INDENT + "throw new RuntimeException(\"Validation failed: \" + errors);");

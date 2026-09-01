@@ -6,7 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.usermodel.Workbook;
-import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import org.apache.poi.xssf.streaming.SXSSFWorkbook;
 import org.springframework.batch.infrastructure.item.Chunk;
 import org.springframework.batch.infrastructure.item.ItemWriter;
 
@@ -28,6 +28,13 @@ import java.util.function.Consumer;
  * <p>This class is auto-instantiated by {@code BatchExportJobAnnotationProcessor}.
  * You don't need to create it manually.</p>
  *
+ * <p>NEW: uses POI's {@link SXSSFWorkbook} (streaming) rather than
+ * {@code XSSFWorkbook} (fully in-memory). Only a rolling window of rows is
+ * kept in memory - the rest are flushed to a temp file on disk - so exports
+ * of hundreds of thousands or millions of rows no longer risk an OOM. This
+ * requires calling {@code dispose()} after writing to clean up that temp
+ * file, which {@link #finalizeAndSave()} now does.</p>
+ *
  * @param <T> Entity type to export
  */
 @Slf4j
@@ -36,6 +43,9 @@ public class ExcelExportItemWriter<T> implements ItemWriter<T> {
     private static final String CONTENT_TYPE =
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
+    /** Rows kept in memory at once before older rows are flushed to disk. */
+    private static final int IN_MEMORY_ROW_WINDOW = 200;
+
     private final List<ExportColumn<T>> columns;
     private final String fileName;
     private final String sheetName;
@@ -43,7 +53,7 @@ public class ExcelExportItemWriter<T> implements ItemWriter<T> {
     private final Consumer<String> onSaveComplete;   // receives the URL after save
     private final Consumer<Throwable> onSaveFailure;
 
-    private final Workbook workbook;
+    private final SXSSFWorkbook workbook;
     private final Sheet sheet;
     private int rowIndex = 1; // row 0 = header
 
@@ -60,7 +70,7 @@ public class ExcelExportItemWriter<T> implements ItemWriter<T> {
         this.onSaveComplete = onSaveComplete;
         this.onSaveFailure = onSaveFailure;
 
-        this.workbook = new XSSFWorkbook();
+        this.workbook = new SXSSFWorkbook(IN_MEMORY_ROW_WINDOW);
         this.sheet = workbook.createSheet(sheetName);
         writeHeaderRow();
     }
@@ -130,6 +140,11 @@ public class ExcelExportItemWriter<T> implements ItemWriter<T> {
         } catch (Exception e) {
             log.error("Failed to save export file: {}", e.getMessage(), e);
             onSaveFailure.accept(e);     // ← fires SimpleExportProcessor.onSaveFailure(error)
+        } finally {
+            // FIXED: SXSSFWorkbook backs rows-in-window overflow with a
+            // temp file on disk. Without dispose(), that temp file is
+            // leaked on every single export run.
+            workbook.dispose();
         }
     }
 }

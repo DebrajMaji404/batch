@@ -109,4 +109,11 @@ public @interface BatchExportJob {
      * Controller returns immediately; use {@code onSaveComplete()} to get notified when done.
      */
     boolean async() default true;
+
+    /**
+     * NEW: Dry run mode - read and validate rows but skip building/uploading
+     * the actual output file. Useful for verifying a JPQL query and column
+     * mappings against real data without producing a file. Default is false.
+     */
+    boolean dryRun() default false;
 }

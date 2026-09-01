@@ -191,4 +191,15 @@ public @interface BatchJob {
      * Default is false
      */
     boolean dryRun() default false;
+
+    /**
+     * NEW: Cache Jakarta Bean Validation results within a job run, keyed by
+     * the DTO's toString(). Real-world files (Excel/CSV exports from other
+     * systems) very often contain repeated rows/lookup values, and
+     * re-running reflection-based validator.validate() on identical content
+     * is wasted work. Enabled by default; disable if your DTO's toString()
+     * doesn't reflect its full field content (e.g. a custom/partial
+     * toString()), since that would make the cache key unreliable.
+     */
+    boolean cacheValidation() default true;
 }

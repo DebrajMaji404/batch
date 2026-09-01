@@ -88,9 +88,15 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
         generateReader(pkg, className, ann.stepName(), entityClass, entityFqn);
 
         generateWriter(pkg, className, ann.stepName(), entityClass, entityFqn,
-                ann.storageType(), ann.fileType(), ann.fileName(), sheetName, ann.localDirectory());
+                ann.storageType(), ann.fileType(), ann.fileName(), sheetName, ann.localDirectory(), ann.dryRun());
 
-        generateStepListener(pkg, className, ann.stepName(), entityClass, entityFqn, ann.fileType());
+        generateStepListener(pkg, className, ann.stepName(), entityClass, entityFqn, ann.fileType(), ann.dryRun());
+
+        // FIXED: export jobs previously had .skip(Exception.class) +
+        // .skipLimit(...) with no SkipListener at all - skipped entities
+        // were counted internally by Spring Batch but never surfaced via
+        // BatchUtility.getSkippedItems() the way @BatchJob skips are.
+        generateExportSkipListener(pkg, className, ann.jobName(), entityClass, entityFqn);
     }
 
     private void validateExportConfiguration(String jobName, String stepName, int chunkSize, int skipLimit) {
@@ -117,9 +123,12 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
             out.println("package " + pkg + ";");
             out.println();
             out.println("import " + entityFqn + ";");
+            out.println("import com.eazy.batch.listener.JobCompletionListener;");
+            out.println("import com.eazy.batch.listener.BatchProgressChunkListener;");
             out.println("import lombok.RequiredArgsConstructor;");
             out.println("import lombok.extern.slf4j.Slf4j;");
             out.println("import org.springframework.batch.core.job.Job;");
+            out.println("import org.springframework.batch.core.listener.SkipListener;");
             out.println("import org.springframework.batch.core.step.Step;");
             out.println("import org.springframework.batch.core.job.builder.JobBuilder;");
             out.println("import org.springframework.batch.core.step.builder.StepBuilder;");
@@ -138,11 +147,13 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
             out.println();
             out.println(I + "private final JobRepository jobRepository;");
             out.println(I + "private final PlatformTransactionManager transactionManager;");
+            out.println(I + "private final JobCompletionListener jobCompletionListener;");
             out.println();
             out.println(I + "@Bean");
             out.println(I + "public Job " + jobName + "(Step " + stepName + ") {");
             out.println(II + "log.info(\"Initializing export job: {}\", \"" + jobName + "\");");
             out.println(II + "return new JobBuilder(\"" + jobName + "\", jobRepository)");
+            out.println(IV + ".listener(jobCompletionListener)");
             out.println(IV + ".start(" + stepName + ")");
             out.println(IV + ".build();");
             out.println(I + "}");
@@ -151,6 +162,8 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
             out.println(I + "public Step " + stepName + "(");
             out.println(III + "ItemReader<" + entityClass + "> reader,");
             out.println(III + "ItemWriter<" + entityClass + "> writer,");
+            out.println(III + "SkipListener<" + entityClass + ", " + entityClass + "> skipListener,");
+            out.println(III + "BatchProgressChunkListener progressChunkListener,");
             out.println(III + className + "ExportStepListener stepListener) {");
             out.println(II + "return new StepBuilder(\"" + stepName + "\", jobRepository)");
             out.println(IV + ".<" + entityClass + ", " + entityClass + ">chunk(" + chunkSize + ", transactionManager)");
@@ -159,6 +172,9 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
             out.println(IV + ".faultTolerant()");
             out.println(IV + ".skipLimit(" + skipLimit + ")");
             out.println(IV + ".skip(Exception.class)");
+            out.println(IV + ".listener(skipListener)");
+            // NEW: live progress push over WebSocket after every chunk.
+            out.println(IV + ".listener(progressChunkListener)");
             out.println(IV + ".listener(stepListener)");
             out.println(IV + ".build();");
             out.println(I + "}");
@@ -219,7 +235,8 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
     private void generateWriter(String pkg, String className, String stepName,
                                 String entityClass, String entityFqn,
                                 StorageType storage, ExportFileType format,
-                                String fileName, String sheetName, String localDirectory) throws IOException {
+                                String fileName, String sheetName, String localDirectory,
+                                boolean dryRun) throws IOException {
         String gen         = className + "ExportWriter";
         String writerClass = format == ExportFileType.CSV ? "CsvExportItemWriter" : "ExcelExportItemWriter";
         String writerType  = writerClass + "<" + entityClass + ">";
@@ -232,6 +249,27 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
 
             out.println("package " + pkg + ";");
             out.println();
+            if (dryRun) {
+                // NEW: dry-run mode - no file is ever built or uploaded.
+                // Useful for verifying a JPQL query and column mappings
+                // against real data without producing output.
+                out.println("import org.springframework.batch.infrastructure.item.ItemWriter;");
+                out.println("import lombok.extern.slf4j.Slf4j;");
+                out.println("import org.springframework.context.annotation.Bean;");
+                out.println("import org.springframework.context.annotation.Configuration;");
+                out.println();
+                out.println("/** Auto-generated DRY-RUN export writer for " + className + " — DO NOT MODIFY */");
+                out.println("@Slf4j");
+                out.println("@Configuration");
+                out.println("public class " + gen + " {");
+                out.println();
+                out.println(I + "@Bean");
+                out.println(I + "public ItemWriter<" + entityClass + "> " + stepName + "ExportItemWriter() {");
+                out.println(II + "return chunk -> log.info(\"[DRY RUN][" + className + "] Would write {} rows (no file will be produced)\", chunk.size());");
+                out.println(I + "}");
+                out.println("}");
+                return;
+            }
             out.println("import " + entityFqn + ";");
             out.println("import com.eazy.batch.writer." + writerClass + ";");
             out.println("import com.eazy.batch.service.ExportStorageService;");
@@ -313,7 +351,7 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
 
     private void generateStepListener(String pkg, String className, String stepName,
                                       String entityClass, String entityFqn,
-                                      ExportFileType format) throws IOException {
+                                      ExportFileType format, boolean dryRun) throws IOException {
         String gen         = className + "ExportStepListener";
         String writerClass = format == ExportFileType.CSV ? "CsvExportItemWriter" : "ExcelExportItemWriter";
         String writerType  = writerClass + "<" + entityClass + ">";
@@ -324,7 +362,9 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
             out.println("package " + pkg + ";");
             out.println();
             out.println("import " + entityFqn + ";");
-            out.println("import com.eazy.batch.writer." + writerClass + ";");
+            if (!dryRun) {
+                out.println("import com.eazy.batch.writer." + writerClass + ";");
+            }
             out.println("import lombok.RequiredArgsConstructor;");
             out.println("import lombok.extern.slf4j.Slf4j;");
             out.println("import org.springframework.batch.core.ExitStatus;");
@@ -339,7 +379,9 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
             out.println("@RequiredArgsConstructor");
             out.println("public class " + gen + " implements StepExecutionListener {");
             out.println();
-            out.println(I + "private final " + writerType + " writer;");
+            if (!dryRun) {
+                out.println(I + "private final " + writerType + " writer;");
+            }
             out.println(I + "private final " + className + " delegate;");
             out.println();
             out.println(I + "@Override");
@@ -356,8 +398,12 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
             out.println(III + "log.error(\"[" + className + "] Step failed — skipping file save\");");
             out.println(III + "return stepExecution.getExitStatus();");
             out.println(II + "}");
-            out.println(II + "// Serialize file → upload to storage → fire onSaveComplete(url)");
-            out.println(II + "writer.finalizeAndSave();");
+            if (dryRun) {
+                out.println(II + "log.info(\"[DRY RUN][" + className + "] No file produced.\");");
+            } else {
+                out.println(II + "// Serialize file → upload to storage → fire onSaveComplete(url)");
+                out.println(II + "writer.finalizeAndSave();");
+            }
             out.println(II + "return stepExecution.getExitStatus();");
             out.println(I + "}");
             out.println("}");
@@ -367,6 +413,55 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
     // ─────────────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────────────
+
+    private void generateExportSkipListener(String pkg, String className, String jobName,
+                                             String entityClass, String entityFqn) throws IOException {
+        String gen = className + "ExportSkipListener";
+        try (PrintWriter out = new PrintWriter(
+                processingEnv.getFiler().createSourceFile(pkg + "." + gen).openWriter())) {
+
+            out.println("package " + pkg + ";");
+            out.println();
+            out.println("import " + entityFqn + ";");
+            out.println("import com.eazy.batch.service.MetricsService;");
+            out.println("import lombok.RequiredArgsConstructor;");
+            out.println("import lombok.extern.slf4j.Slf4j;");
+            out.println("import org.springframework.batch.core.listener.SkipListener;");
+            out.println("import org.springframework.lang.NonNull;");
+            out.println("import org.springframework.stereotype.Component;");
+            out.println("import static com.eazy.batch.utility.BatchUtility.addSkippedItem;");
+            out.println();
+            out.println("/** Auto-generated skip listener for " + className + " — DO NOT MODIFY */");
+            out.println("@Slf4j");
+            out.println("@Component");
+            out.println("@RequiredArgsConstructor");
+            out.println("public class " + gen + " implements SkipListener<" + entityClass + ", " + entityClass + "> {");
+            out.println();
+            out.println(I + "private final MetricsService metricsService;");
+            out.println();
+            out.println(I + "@Override");
+            out.println(I + "public void onSkipInRead(@NonNull Throwable throwable) {");
+            out.println(II + "addSkippedItem(null, \"READ\", throwable.getMessage());");
+            out.println(II + "metricsService.recordItemSkipped(\"" + jobName + "\", \"READ\");");
+            out.println(II + "log.error(\"[" + className + "][SKIP-READ] {}\", throwable.getMessage(), throwable);");
+            out.println(I + "}");
+            out.println();
+            out.println(I + "@Override");
+            out.println(I + "public void onSkipInProcess(@NonNull " + entityClass + " item, @NonNull Throwable throwable) {");
+            out.println(II + "addSkippedItem(item, \"PROCESS\", throwable.getMessage());");
+            out.println(II + "metricsService.recordItemSkipped(\"" + jobName + "\", \"PROCESS\");");
+            out.println(II + "log.error(\"[" + className + "][SKIP-PROCESS] {}\", throwable.getMessage(), throwable);");
+            out.println(I + "}");
+            out.println();
+            out.println(I + "@Override");
+            out.println(I + "public void onSkipInWrite(@NonNull " + entityClass + " item, @NonNull Throwable throwable) {");
+            out.println(II + "addSkippedItem(item, \"WRITE\", throwable.getMessage());");
+            out.println(II + "metricsService.recordItemSkipped(\"" + jobName + "\", \"WRITE\");");
+            out.println(II + "log.error(\"[" + className + "][SKIP-WRITE] {}\", throwable.getMessage(), throwable);");
+            out.println(I + "}");
+            out.println("}");
+        }
+    }
 
     private String getClassFqn(BatchExportJob annotation) {
         try {
