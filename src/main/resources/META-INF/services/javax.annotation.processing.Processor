@@ -1,1 +1,2 @@
 com.eazy.batch.processor.BatchJobAnnotationProcessor
+com.eazy.batch.processor.BatchExportJobAnnotationProcessor

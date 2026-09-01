@@ -16,6 +16,7 @@ import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 
@@ -82,7 +83,7 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
                     if (sheetIndex >= workbook.getNumberOfSheets()) {
                         throw new InvalidTemplateException(
                                 "Sheet index " + sheetIndex + " out of bounds. " +
-                                        "Workbook has " + workbook.getNumberOfSheets() + " sheets"
+                                "Workbook has " + workbook.getNumberOfSheets() + " sheets"
                         );
                     }
                     this.sheet = workbook.getSheetAt(sheetIndex);
@@ -201,6 +202,20 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
                 }
                 return LocalDate.parse(stringValue.trim(),
                         DateTimeFormatter.ofPattern(pattern));
+            } else if (fieldType == LocalDateTime.class) {
+                // Check for custom date format on field
+                String pattern = datePattern;
+                if (field.isAnnotationPresent(ExcelDateFormat.class)) {
+                    pattern = field.getAnnotation(ExcelDateFormat.class).pattern();
+                }
+                // Try LocalDateTime parse first, fall back to LocalDate + atStartOfDay
+                try {
+                    return LocalDateTime.parse(stringValue.trim(),
+                            DateTimeFormatter.ofPattern(pattern));
+                } catch (Exception e) {
+                    return LocalDate.parse(stringValue.trim(),
+                            DateTimeFormatter.ofPattern(pattern)).atStartOfDay();
+                }
             } else if (fieldType.isEnum()) {
                 return parseEnum(fieldType, stringValue.trim(), rowNum, columnIndex);
             }
@@ -211,7 +226,7 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
             throw new RuntimeException(
                     String.format(
                             "Failed to parse value '%s' for field '%s' (column '%s') " +
-                                    "at row %d, column %d: %s",
+                            "at row %d, column %d: %s",
                             stringValue, field.getName(), headerName,
                             rowNum, columnIndex, e.getMessage()
                     ),
@@ -272,7 +287,7 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
         throw new IllegalArgumentException(
                 String.format(
                         "Cannot convert '%s' to enum %s at row %d, column %d. " +
-                                "Valid values: %s",
+                        "Valid values: %s",
                         value, enumType.getSimpleName(), rowNum, columnIndex,
                         Arrays.toString(enumType.getEnumConstants())
                 )
@@ -319,7 +334,7 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
             if (headerRow == null) {
                 throw new InvalidTemplateException(
                         "Excel file does not contain a header row in sheet: " +
-                                (sheetName != null ? sheetName : "index " + sheetIndex)
+                        (sheetName != null ? sheetName : "index " + sheetIndex)
                 );
             }
 

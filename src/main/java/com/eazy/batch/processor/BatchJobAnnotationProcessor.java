@@ -115,7 +115,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import org.springframework.batch.core.listener.SkipListener;");
             out.println("import org.springframework.batch.core.step.Step;");
             out.println("import org.springframework.batch.core.job.builder.JobBuilder;");
-            out.println("import org.springframework.batch.core.job.parameters.RunIdIncrementer;");
+            out.println("import com.eazy.batch.listener.JobCompletionListener;");
             out.println("import org.springframework.batch.core.repository.JobRepository;");
             out.println("import org.springframework.batch.core.step.builder.ChunkOrientedStepBuilder;");
             out.println("import org.springframework.batch.core.step.skip.LimitCheckingExceptionHierarchySkipPolicy;");
@@ -123,7 +123,6 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import org.springframework.batch.infrastructure.item.ItemProcessor;");
             out.println("import org.springframework.batch.infrastructure.item.ItemReader;");
             out.println("import org.springframework.batch.infrastructure.item.ItemWriter;");
-            out.println("import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;");
             out.println("import org.springframework.context.annotation.Bean;");
             out.println("import org.springframework.context.annotation.Configuration;");
             out.println("import org.springframework.transaction.PlatformTransactionManager;");
@@ -140,13 +139,13 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println();
             out.println(INDENT + "private final JobRepository jobRepository;");
             out.println(INDENT + "private final PlatformTransactionManager transactionManager;");
+            out.println(INDENT + "private final JobCompletionListener jobCompletionListener;");
             out.println();
             out.println(INDENT + "@Bean");
-            out.println(INDENT + "@ConditionalOnProperty(name = \"spring.batch.job.enabled\", havingValue = \"false\", matchIfMissing = true)");
             out.println(INDENT + "public Job " + jobName + "(Step " + stepName + ") {");
             out.println(DOUBLE_INDENT + "log.info(\"Initializing batch job: {}\", \"" + jobName + "\");");
             out.println(DOUBLE_INDENT + "return new JobBuilder(\"" + jobName + "\", jobRepository)");
-            out.println(QUAD_INDENT + ".incrementer(new RunIdIncrementer())");
+            out.println(QUAD_INDENT + ".listener(jobCompletionListener)");
             out.println(QUAD_INDENT + ".start(" + stepName + ")");
             out.println(QUAD_INDENT + ".build();");
             out.println(INDENT + "}");
@@ -188,9 +187,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             }
             out.println("import " + dtoClassFqn + ";");
             out.println("import lombok.extern.slf4j.Slf4j;");
-            out.println("import org.springframework.batch.infrastructure.item.ItemReader;");
-            out.println("import org.springframework.context.annotation.Scope;");
-            out.println("import org.springframework.context.annotation.ScopedProxyMode;");
+            out.println("import org.springframework.batch.core.configuration.annotation.StepScope;");
             out.println("import org.springframework.beans.factory.annotation.Value;");
             out.println("import org.springframework.context.annotation.Bean;");
             out.println("import org.springframework.context.annotation.Configuration;");
@@ -201,8 +198,12 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("public class " + generatedClassName + " {");
             out.println();
             out.println(INDENT + "@Bean");
-            out.println(INDENT + "@Scope(value = \"step\", proxyMode = ScopedProxyMode.TARGET_CLASS)");
-            out.println(INDENT + "public ItemReader<" + dtoClassName + "> " + stepName + "ItemReader(");
+            out.println(INDENT + "@StepScope");
+            if (fileType == FileType.CSV) {
+                out.println(INDENT + "public CSVItemReader<" + dtoClassName + "> " + stepName + "ItemReader(");
+            } else {
+                out.println(INDENT + "public ExcelItemReaderWithHeaderValidation<" + dtoClassName + "> " + stepName + "ItemReader(");
+            }
             out.println(TRIPLE_INDENT + "@Value(\"#{jobParameters['filePath']}\") String filePath) {");
             out.println(DOUBLE_INDENT + "log.debug(\"Initializing " + fileType + " reader for file: {}\", filePath);");
             if (fileType == FileType.CSV) {
