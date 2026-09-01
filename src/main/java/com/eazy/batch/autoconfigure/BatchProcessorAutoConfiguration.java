@@ -1,13 +1,16 @@
 package com.eazy.batch.autoconfigure;
 
+import com.eazy.batch.listener.BatchProgressChunkListener;
 import com.eazy.batch.listener.JobCompletionListener;
 import com.eazy.batch.service.BatchCleanupService;
+import com.eazy.batch.service.BatchWebSocketNotifier;
 import com.eazy.batch.service.EmailNotificationService;
 import com.eazy.batch.service.ExportStorageService;
 import com.eazy.batch.service.LocalExportStorageService;
 import com.eazy.batch.service.MetricsService;
 import com.eazy.batch.service.ProgressTrackingService;
 import com.eazy.batch.utility.BatchUtility;
+import com.eazy.batch.websocket.BatchWebSocketConfig;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.validation.Validator;
 import lombok.extern.slf4j.Slf4j;
@@ -23,10 +26,12 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.task.TaskExecutor;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.validation.beanvalidation.LocalValidatorFactoryBean;
@@ -44,6 +49,7 @@ import javax.sql.DataSource;
 @EnableConfigurationProperties(BatchProcessorProperties.class)
 @EnableBatchProcessing
 @EnableScheduling
+@Import(BatchWebSocketConfig.class)
 public class BatchProcessorAutoConfiguration {
 
     private final BatchProcessorProperties properties;
@@ -137,12 +143,14 @@ public class BatchProcessorAutoConfiguration {
      * FIXED: now depends on MetricsService, which is therefore always
      * registered below (not conditional) so this wiring never fails
      * regardless of whether metrics are actually enabled.
+     * NEW: also depends on BatchWebSocketNotifier for the final
+     * COMPLETED/FAILED WebSocket push with the error-report Excel attached.
      */
     @Bean
     @ConditionalOnMissingBean(JobCompletionListener.class)
-    public JobCompletionListener jobCompletionListener(MetricsService metricsService) {
+    public JobCompletionListener jobCompletionListener(MetricsService metricsService, BatchWebSocketNotifier webSocketNotifier) {
         log.info("✅ Default JobCompletionListener registered");
-        return new JobCompletionListener(metricsService);
+        return new JobCompletionListener(metricsService, webSocketNotifier);
     }
 
     /**
@@ -227,5 +235,33 @@ public class BatchProcessorAutoConfiguration {
         log.info("✅ Local export storage registered (directory={})",
                 (dir == null || dir.isBlank()) ? "<system temp dir>" : dir);
         return new LocalExportStorageService(dir);
+    }
+
+    /**
+     * NEW: pushes job progress + a final completion/failure message (with an
+     * embedded error-report Excel when rows were skipped) over WebSocket.
+     * Always registered - it's a thin wrapper around an optional
+     * SimpMessagingTemplate and no-ops entirely when
+     * eazy.batch.websocket-enabled=false or the STOMP infrastructure isn't
+     * active, so nothing that depends on it needs a conditional.
+     */
+    @Bean
+    @ConditionalOnMissingBean(BatchWebSocketNotifier.class)
+    public BatchWebSocketNotifier batchWebSocketNotifier(ObjectProvider<SimpMessagingTemplate> templateProvider) {
+        boolean enabled = properties.isWebsocketEnabled();
+        log.info("✅ Batch WebSocket Notifier registered (enabled={}, topicPrefix={})",
+                enabled, properties.getWebsocketTopicPrefix());
+        return new BatchWebSocketNotifier(templateProvider.getIfAvailable(), enabled, properties.getWebsocketTopicPrefix());
+    }
+
+    /**
+     * NEW: shared ChunkListener attached to every generated Step (both
+     * @BatchJob and @BatchExportJob) that broadcasts a PROGRESS message
+     * after each chunk. See BatchProgressChunkListener for details.
+     */
+    @Bean
+    @ConditionalOnMissingBean(BatchProgressChunkListener.class)
+    public BatchProgressChunkListener batchProgressChunkListener(BatchWebSocketNotifier webSocketNotifier) {
+        return new BatchProgressChunkListener(webSocketNotifier);
     }
 }

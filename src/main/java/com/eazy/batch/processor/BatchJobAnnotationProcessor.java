@@ -150,6 +150,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import org.springframework.batch.core.step.Step;");
             out.println("import org.springframework.batch.core.job.builder.JobBuilder;");
             out.println("import com.eazy.batch.listener.JobCompletionListener;");
+            out.println("import com.eazy.batch.listener.BatchProgressChunkListener;");
             out.println("import org.springframework.batch.core.repository.JobRepository;");
             out.println("import org.springframework.batch.core.step.builder.ChunkOrientedStepBuilder;");
             out.println("import org.springframework.batch.core.step.skip.LimitCheckingExceptionHierarchySkipPolicy;");
@@ -190,7 +191,8 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(TRIPLE_INDENT + "ItemReader<" + dtoClassName + "> reader,");
             out.println(TRIPLE_INDENT + "ItemProcessor<" + dtoClassName + ", " + wrapperClassName + "> processor,");
             out.println(TRIPLE_INDENT + "ItemWriter<" + wrapperClassName + "> writer,");
-            out.println(TRIPLE_INDENT + "SkipListener<" + dtoClassName + ", " + wrapperClassName + "> skipListener) {");
+            out.println(TRIPLE_INDENT + "SkipListener<" + dtoClassName + ", " + wrapperClassName + "> skipListener,");
+            out.println(TRIPLE_INDENT + "BatchProgressChunkListener progressChunkListener) {");
             out.println(DOUBLE_INDENT + "log.info(\"Initializing batch step: {}\", \"" + stepName + "\");");
             out.println(DOUBLE_INDENT + "int effectiveChunkSize = " + (chunkSize == -1 ? "batchProcessorProperties.getDefaultChunkSize();" : chunkSize + ";"));
             out.println(DOUBLE_INDENT + "int effectiveSkipLimit = " + (skipLimit == -1 ? "batchProcessorProperties.getDefaultSkipLimit();" : skipLimit + ";"));
@@ -208,6 +210,8 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(TRIPLE_INDENT + ".faultTolerant()");
             out.println(TRIPLE_INDENT + ".skipPolicy(skipPolicy)");
             out.println(TRIPLE_INDENT + ".listener(skipListener)");
+            // NEW: live progress push over WebSocket after every chunk.
+            out.println(TRIPLE_INDENT + ".listener(progressChunkListener)");
             out.println(TRIPLE_INDENT + ".build();");
             out.println(INDENT + "}");
             out.println("}");

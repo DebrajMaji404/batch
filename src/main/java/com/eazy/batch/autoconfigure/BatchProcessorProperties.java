@@ -119,4 +119,24 @@ public class BatchProcessorProperties {
      * system temp directory if left blank.
      */
     private String exportLocalDirectory = "";
+
+    /**
+     * Enable the built-in WebSocket (STOMP) progress + error-report push.
+     * When true, a STOMP endpoint is registered at websocketEndpoint (default
+     * "/ws-batch") and every job broadcasts progress after each chunk, plus
+     * a final message on completion/failure - including a base64-encoded
+     * Excel file of any skipped rows - to /topic/batch-progress/{jobExecutionId}.
+     */
+    private boolean websocketEnabled = true;
+
+    /**
+     * STOMP endpoint path clients connect to (with SockJS fallback enabled).
+     */
+    private String websocketEndpoint = "/ws-batch";
+
+    /**
+     * Destination prefix jobs broadcast to. The full destination for a given
+     * run is "{websocketTopicPrefix}/{jobExecutionId}".
+     */
+    private String websocketTopicPrefix = "/topic/batch-progress";
 }

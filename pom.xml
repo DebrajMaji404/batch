@@ -98,6 +98,13 @@
             <version>5.12.0</version>
         </dependency>
 
+        <!-- WebSocket (STOMP) support for live progress + error-report push -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+            <version>${spring-boot.version}</version>
+        </dependency>
+
     </dependencies>
 
     <build>
