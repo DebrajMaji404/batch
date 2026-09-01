@@ -482,6 +482,11 @@ eazy.batch.from-email=noreply@batch.com
 # doesn't set localDirectory(). Falls back to the system temp directory if blank.
 eazy.batch.export.local-directory=
 
+# Live progress + error report over WebSocket - see dedicated section below
+eazy.batch.websocket-enabled=true
+eazy.batch.websocket-endpoint=/ws-batch
+eazy.batch.websocket-topic-prefix=/topic/batch-progress
+
 # Spring Batch settings
 spring.batch.job.enabled=false
 # Leave as 'never' - this library's own smart CommandLineRunner creates the batch
@@ -526,10 +531,135 @@ needed.
 
 ---
 
+## Live progress + error report over WebSocket (no Kafka needed)
+
+Every job — `@BatchJob` or `@BatchExportJob` — automatically broadcasts progress over a
+built-in STOMP/WebSocket endpoint. No external broker: Spring's in-memory simple broker
+handles delivery to whichever browser tabs are subscribed. This is on by default
+(`eazy.batch.websocket-enabled=true`).
+
+**What gets sent, to where:**
+
+- After every chunk, a `PROGRESS` message is broadcast to
+  `{websocketTopicPrefix}/{jobExecutionId}` (default topic prefix `/topic/batch-progress`,
+  so e.g. `/topic/batch-progress/42`).
+- Exactly one `COMPLETED` or `FAILED` message is sent at the end. If any rows were skipped,
+  that message carries a base64-encoded `.xlsx` error report (columns: Item / Phase / Reason)
+  in `errorFileBase64` — decode it client-side and either save it or turn it into a download
+  link. No error report is attached if nothing was skipped.
+
+**Message shape** (`BatchProgressMessage`, serialized as JSON):
+
+```json
+{
+  "type": "PROGRESS",
+  "jobExecutionId": 42,
+  "jobName": "myJob",
+  "readCount": 500,
+  "writeCount": 480,
+  "skipCount": 20,
+  "durationMs": null,
+  "errorFileName": null,
+  "errorFileBase64": null,
+  "errorFileSizeBytes": null
+}
+```
+
+On completion, `type` becomes `"COMPLETED"`/`"FAILED"`, `durationMs` is set, and — only if
+`skipCount > 0` — `errorFileName`/`errorFileBase64`/`errorFileSizeBytes` are populated.
+
+### Server side — nothing to configure
+
+The endpoint, broker, and every job's broadcast are wired up automatically. Your controller
+just needs to give the client the `jobExecutionId` to subscribe to:
+
+```java
+@RestController
+@RequiredArgsConstructor
+public class BatchController {
+
+    private final TaskExecutorJobLauncher jobLauncher;
+
+    @Qualifier("myJob")
+    private final Job myJob;
+
+    @PostMapping("/api/batch/upload")
+    public ResponseEntity<Long> upload(@RequestParam("file") MultipartFile file) throws Exception {
+        String filePath = fileService.saveFile(file);
+        JobParameters params = new JobParametersBuilder()
+                .addString("filePath", filePath)
+                .addLong("timestamp", System.currentTimeMillis())
+                .toJobParameters();
+
+        JobExecution execution = jobLauncher.run(myJob, params);
+        // JobExecution (and its id) is available immediately - the job itself
+        // runs in the background via TaskExecutorJobLauncher.
+        return ResponseEntity.ok(execution.getId());
+    }
+}
+```
+
+### Client side (JavaScript, using `@stomp/stompjs` + `sockjs-client`)
+
+```javascript
+import { Client } from '@stomp/stompjs';
+import SockJS from 'sockjs-client';
+
+const jobExecutionId = await startUpload(file); // POST above, returns the id
+
+const client = new Client({
+  webSocketFactory: () => new SockJS('/ws-batch'),
+  onConnect: () => {
+    client.subscribe(`/topic/batch-progress/${jobExecutionId}`, (frame) => {
+      const msg = JSON.parse(frame.body);
+
+      if (msg.type === 'PROGRESS') {
+        updateProgressBar(msg.writeCount, msg.readCount);
+      } else {
+        // COMPLETED or FAILED
+        if (msg.errorFileBase64) {
+          downloadBase64File(msg.errorFileBase64, msg.errorFileName);
+        }
+        showFinalStatus(msg.type, msg);
+        client.deactivate();
+      }
+    });
+  },
+});
+client.activate();
+
+function downloadBase64File(base64, fileName) {
+  const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+  const blob = new Blob([bytes], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+```
+
+### Configuration
+
+```properties
+eazy.batch.websocket-enabled=true                     # default true
+eazy.batch.websocket-endpoint=/ws-batch                # STOMP endpoint (SockJS fallback included)
+eazy.batch.websocket-topic-prefix=/topic/batch-progress
+```
+
+Set `eazy.batch.websocket-enabled=false` to disable entirely (no endpoint registered, no
+messages sent — every job runs exactly as before, just without the broadcast).
+
+---
+
 ## Overriding the default `JobCompletionListener`
 
 ```java
 import com.eazy.batch.listener.JobCompletionListener;
+import com.eazy.batch.service.BatchWebSocketNotifier;
 import com.eazy.batch.service.MetricsService;
 import org.springframework.batch.core.job.JobExecution;
 import org.springframework.context.annotation.Bean;
@@ -539,8 +669,9 @@ import org.springframework.context.annotation.Configuration;
 public class BatchConfig {
 
     @Bean
-    public JobCompletionListener jobCompletionListener(MetricsService metricsService) {
-        return new JobCompletionListener(metricsService) {
+    public JobCompletionListener jobCompletionListener(MetricsService metricsService,
+                                                         BatchWebSocketNotifier webSocketNotifier) {
+        return new JobCompletionListener(metricsService, webSocketNotifier) {
             @Override
             public void afterJob(JobExecution jobExecution) {
                 super.afterJob(jobExecution);
