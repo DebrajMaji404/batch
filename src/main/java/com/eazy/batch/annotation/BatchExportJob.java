@@ -116,4 +116,24 @@ public @interface BatchExportJob {
      * mappings against real data without producing a file. Default is false.
      */
     boolean dryRun() default false;
+
+    /**
+     * NEW: Send an email on export completion. Requires recipients() and
+     * eazy.batch.email-notifications-enabled=true + SMTP config. Reuses the
+     * same EmailNotificationService/generated-listener mechanism as
+     * @BatchJob's notifyOnCompletion. Default is false.
+     */
+    boolean notifyOnCompletion() default false;
+
+    /**
+     * NEW: Send an email if the export fails. See notifyOnCompletion().
+     * Default is false.
+     */
+    boolean notifyOnFailure() default false;
+
+    /**
+     * Email recipients for notifications.
+     * Required if notifyOnCompletion or notifyOnFailure = true.
+     */
+    String[] recipients() default {};
 }

@@ -82,8 +82,14 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
 
         validateExportConfiguration(ann.jobName(), ann.stepName(), ann.chunkSize(), ann.skipLimit());
 
+        boolean hasNotification = ann.notifyOnCompletion() || ann.notifyOnFailure();
+        if (hasNotification && (ann.recipients() == null || ann.recipients().length == 0)) {
+            throw new IllegalArgumentException(
+                    "notifyOnCompletion/notifyOnFailure is true but recipients() is empty on @BatchExportJob for " + className);
+        }
+
         generateJobConfig(pkg, className, ann.jobName(), ann.stepName(),
-                ann.chunkSize(), ann.skipLimit(), entityClass, entityFqn);
+                ann.chunkSize(), ann.skipLimit(), entityClass, entityFqn, hasNotification);
 
         generateReader(pkg, className, ann.stepName(), entityClass, entityFqn);
 
@@ -97,6 +103,13 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
         // were counted internally by Spring Batch but never surfaced via
         // BatchUtility.getSkippedItems() the way @BatchJob skips are.
         generateExportSkipListener(pkg, className, ann.jobName(), entityClass, entityFqn);
+
+        // NEW: notifyOnCompletion/notifyOnFailure/recipients parity with
+        // @BatchJob, reusing the same generated-listener mechanism.
+        if (hasNotification) {
+            generateExportNotificationListener(pkg, className, ann.jobName(),
+                    ann.notifyOnCompletion(), ann.notifyOnFailure(), ann.recipients());
+        }
     }
 
     private void validateExportConfiguration(String jobName, String stepName, int chunkSize, int skipLimit) {
@@ -115,7 +128,7 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
 
     private void generateJobConfig(String pkg, String className, String jobName, String stepName,
                                    int chunkSize, int skipLimit,
-                                   String entityClass, String entityFqn) throws IOException {
+                                   String entityClass, String entityFqn, boolean hasNotification) throws IOException {
         String gen = className + "ExportConfiguration";
         try (PrintWriter out = new PrintWriter(
                 processingEnv.getFiler().createSourceFile(pkg + "." + gen).openWriter())) {
@@ -150,10 +163,13 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
             out.println(I + "private final JobCompletionListener jobCompletionListener;");
             out.println();
             out.println(I + "@Bean");
-            out.println(I + "public Job " + jobName + "(Step " + stepName + ") {");
+            out.println(I + "public Job " + jobName + "(Step " + stepName + (hasNotification ? ", " + className + "ExportNotificationListener notificationListener" : "") + ") {");
             out.println(II + "log.info(\"Initializing export job: {}\", \"" + jobName + "\");");
             out.println(II + "return new JobBuilder(\"" + jobName + "\", jobRepository)");
             out.println(IV + ".listener(jobCompletionListener)");
+            if (hasNotification) {
+                out.println(IV + ".listener(notificationListener)");
+            }
             out.println(IV + ".start(" + stepName + ")");
             out.println(IV + ".build();");
             out.println(I + "}");
@@ -198,6 +214,7 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
             out.println("import jakarta.persistence.EntityManagerFactory;");
             out.println("import lombok.RequiredArgsConstructor;");
             out.println("import lombok.extern.slf4j.Slf4j;");
+            out.println("import org.springframework.batch.core.configuration.annotation.StepScope;");
             out.println("import org.springframework.batch.infrastructure.item.database.JpaCursorItemReader;");
             out.println("import org.springframework.batch.infrastructure.item.database.builder.JpaCursorItemReaderBuilder;");
             out.println("import org.springframework.context.annotation.Bean;");
@@ -213,6 +230,12 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
             out.println(I + "private final " + className + " delegate;");
             out.println();
             out.println(I + "@Bean");
+            // FIXED: was a plain singleton, meaning a single JpaCursorItemReader
+            // (and its underlying JPA cursor/session) would be shared across
+            // concurrent job executions of the same job. @StepScope gives each
+            // StepExecution its own reader instance, opened/closed with that
+            // execution's lifecycle.
+            out.println(I + "@StepScope");
             out.println(I + "public JpaCursorItemReader<" + entityClass + "> " + stepName + "ExportItemReader() {");
             out.println(II + "String jpql = delegate.getJpqlQuery();");
             out.println(II + "log.info(\"[" + className + "] Export JPQL: {}\", jpql);");
@@ -461,6 +484,69 @@ public class BatchExportJobAnnotationProcessor extends AbstractProcessor {
             out.println(I + "}");
             out.println("}");
         }
+    }
+
+    private void generateExportNotificationListener(String pkg, String className, String jobName,
+                                                      boolean notifyOnCompletion, boolean notifyOnFailure,
+                                                      String[] recipients) throws IOException {
+        String gen = className + "ExportNotificationListener";
+        try (PrintWriter out = new PrintWriter(
+                processingEnv.getFiler().createSourceFile(pkg + "." + gen).openWriter())) {
+
+            out.println("package " + pkg + ";");
+            out.println();
+            out.println("import com.eazy.batch.service.EmailNotificationService;");
+            out.println("import lombok.RequiredArgsConstructor;");
+            out.println("import lombok.extern.slf4j.Slf4j;");
+            out.println("import org.springframework.batch.core.BatchStatus;");
+            out.println("import org.springframework.batch.core.job.JobExecution;");
+            out.println("import org.springframework.batch.core.listener.JobExecutionListener;");
+            out.println("import org.springframework.lang.NonNull;");
+            out.println("import org.springframework.stereotype.Component;");
+            out.println("import java.time.Duration;");
+            out.println("import java.time.ZoneOffset;");
+            out.println();
+            out.println("/** Auto-generated notification listener for " + className + " — DO NOT MODIFY */");
+            out.println("@Slf4j");
+            out.println("@Component");
+            out.println("@RequiredArgsConstructor");
+            out.println("public class " + gen + " implements JobExecutionListener {");
+            out.println();
+            out.println(I + "private final EmailNotificationService emailNotificationService;");
+            out.println(I + "private static final String[] RECIPIENTS = new String[] {" + joinQuoted(recipients) + "};");
+            out.println();
+            out.println(I + "@Override");
+            out.println(I + "public void afterJob(@NonNull JobExecution jobExecution) {");
+            out.println(II + "Duration duration = Duration.ZERO;");
+            out.println(II + "if (jobExecution.getStartTime() != null && jobExecution.getEndTime() != null) {");
+            out.println(III + "duration = Duration.between(jobExecution.getStartTime().toInstant(ZoneOffset.UTC), jobExecution.getEndTime().toInstant(ZoneOffset.UTC));");
+            out.println(II + "}");
+            out.println(II + "long processed = jobExecution.getStepExecutions().stream().mapToLong(se -> se.getWriteCount()).sum();");
+            out.println(II + "long skipped = jobExecution.getStepExecutions().stream().mapToLong(se -> se.getSkipCount()).sum();");
+            if (notifyOnCompletion) {
+                out.println(II + "if (jobExecution.getStatus() == BatchStatus.COMPLETED) {");
+                out.println(III + "emailNotificationService.sendJobCompletionEmail(\"" + jobName + "\", RECIPIENTS, processed, skipped, duration.toString());");
+                out.println(II + "}");
+            }
+            if (notifyOnFailure) {
+                out.println(II + "if (jobExecution.getStatus() == BatchStatus.FAILED) {");
+                out.println(III + "String errorMessage = jobExecution.getAllFailureExceptions().isEmpty() ? \"Unknown error\" : jobExecution.getAllFailureExceptions().get(0).getMessage();");
+                out.println(III + "emailNotificationService.sendJobFailureEmail(\"" + jobName + "\", RECIPIENTS, errorMessage);");
+                out.println(II + "}");
+            }
+            out.println(I + "}");
+            out.println("}");
+        }
+    }
+
+    private String joinQuoted(String[] values) {
+        if (values == null || values.length == 0) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < values.length; i++) {
+            if (i > 0) sb.append(", ");
+            sb.append("\"").append(values[i].replace("\"", "\\\"")).append("\"");
+        }
+        return sb.toString();
     }
 
     private String getClassFqn(BatchExportJob annotation) {

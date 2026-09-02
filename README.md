@@ -236,6 +236,20 @@ All beans are registered automatically — nothing to wire up by hand.
                                         // in messy real-world files). Disable if your DTO's
                                         // toString() doesn't reflect its full field content.
 
+    requiredParameters = {"filePath"}, // Job launch fails (JobParametersInvalidException) if
+                                        // any of these keys are missing, enforced via a
+                                        // generated DefaultJobParametersValidator.
+    optionalParameters = {},           // Combined with requiredParameters() to build the full
+                                        // accepted set - unlisted parameter keys also fail launch.
+
+    parallelProcessing = false,        // Multi-threaded step execution. The reader is
+                                        // automatically wrapped in Spring Batch's
+                                        // SynchronizedItemStreamReader, since the built-in
+                                        // CSV/Excel readers aren't thread-safe on their own.
+    threadPoolSize = 4,                // Documentation-only - concurrency is actually
+                                        // controlled by the shared batchTaskExecutor bean's
+                                        // pool size (eazy.batch.thread-pool-size).
+
     enableRetry = false,               // Retry failed items before they count as a skip
     retryLimit = 3,
     retryableExceptions = {},          // Fully-qualified exception class names
@@ -248,11 +262,10 @@ All beans are registered automatically — nothing to wire up by hand.
 )
 ```
 
-Attributes declared but **not yet implemented** (present for forward-compatibility; using
-them currently has no effect, or — for `partitioned`/`incremental` — they're simply ignored
-rather than erroring): `parallelProcessing`, `threadPoolSize`, `partitioned`, `partitions`,
-`incremental`, `checkpointColumn`, `requiredParameters`, `optionalParameters`. See
-[Known limitations](#known-limitations--roadmap) below.
+Attributes declared but **not yet implemented** — using them currently has no effect for
+`checkpointColumn`, or fails compilation immediately with a clear error for `partitioned`/
+`incremental` (setting either to `true`): `partitioned`, `partitions`, `incremental`,
+`checkpointColumn`. See [Known limitations](#known-limitations--roadmap) below.
 
 ### `SimpleBatchProcessor<DTO, WRAPPER>` reference
 
@@ -433,6 +446,12 @@ shipped code.
     dryRun = false,                           // NEW: read + validate but produce no file -
                                                // useful for testing a JPQL query and column
                                                // mappings against real data
+
+    notifyOnCompletion = false,               // NEW: email on export completion (needs
+                                               // recipients + SMTP config) - same mechanism
+                                               // as @BatchJob's notifyOnCompletion
+    notifyOnFailure    = false,               // NEW: email if the export fails
+    recipients         = {},                  // Required if either notify* flag is true
 
     async = true                              // Documentation-only today - see note below
 )
@@ -686,6 +705,23 @@ Your bean takes priority automatically (`@ConditionalOnMissingBean`).
 
 ---
 
+## Restart support and parallel processing
+
+**Restart:** both file readers (`CSVItemReader`, `ExcelItemReaderWithHeaderValidation`)
+implement `ItemStream` and checkpoint their row position into the step's `ExecutionContext`
+after every chunk. If a step fails partway through, restarting that job execution resumes
+from the last committed chunk instead of re-reading the whole file from row 0/1.
+
+**Parallel processing:** set `@BatchJob(parallelProcessing = true)` to run a step's
+read-process-write cycle across multiple threads from the shared `batchTaskExecutor` pool
+(sized by `eazy.batch.thread-pool-size`). The reader is automatically wrapped in Spring
+Batch's own `SynchronizedItemStreamReader`, since the built-in readers hold internal state
+and aren't thread-safe on their own — this trades some throughput for correctness, which is
+the right default. As with any multi-threaded step, item order isn't guaranteed and a chunk
+may contain non-consecutive items.
+
+---
+
 ## Excel/CSV file format for `@BatchJob`
 
 Headers must match DTO field names (case-insensitive):
@@ -707,24 +743,20 @@ match), and validates it (Jakarta Bean Validation + your `customValidate()`).
 Being upfront about what this library **doesn't** do yet, so you don't discover it the hard
 way:
 
-- **No restart/resumability.** Neither file reader implements `ItemStream`, so a failed step
-  restart always re-reads the whole file from row 0 rather than resuming from the last
-  committed chunk.
-- **No partitioning.** `@BatchJob(partitioned = true, partitions = N)` is accepted but has no
-  effect — no partition handler is generated.
-- **No incremental/checkpointed processing.** `@BatchJob(incremental = true,
-  checkpointColumn = "...")` is accepted but unused.
-- **No parallel/multi-threaded steps.** `@BatchJob(parallelProcessing = true, threadPoolSize
-  = N)` is accepted but the generated `Step` never gets a `taskExecutor` attached. The
-  `batchTaskExecutor` bean exists (used by the async `TaskExecutorJobLauncher`) but doesn't
-  parallelize item processing within a step.
+- **No partitioning.** `@BatchJob(partitioned = true, partitions = N)` fails compilation with
+  a clear error rather than silently doing nothing — no partition handler is generated yet.
+- **No incremental/checkpointed extraction across separate runs.** `@BatchJob(incremental =
+  true, checkpointColumn = "...")` fails compilation for the same reason. (Note: this is
+  different from — and unrelated to — the restart-within-a-failed-run support described
+  above, which IS implemented.)
 - **`FileType.JSON`/`FileType.XML`** and **`ReaderType.DATABASE`/`API`/`KAFKA`** are declared
   on their enums but not implemented. Using them fails the build with a clear compiler error
   rather than a confusing runtime one.
 - **No built-in S3/Firebase/GCS export storage** — only `LOCAL`. Implement
   `ExportStorageService` yourself for anything else (see above).
-- **No retry/notifications for `@BatchExportJob`** — `enableRetry`/`notifyOnCompletion` etc.
-  exist on `@BatchJob` with no equivalent on `@BatchExportJob` yet.
+- **No retry for `@BatchExportJob`** — `enableRetry`/`retryLimit`/`retryableExceptions` exist
+  on `@BatchJob` with no equivalent on `@BatchExportJob` yet. (`notifyOnCompletion`/
+  `notifyOnFailure`/`recipients` ARE supported on both annotations.)
 - **`CustomJobCompletionListener` is not auto-wired.** Implementing it and registering it as
   a bean does nothing on its own — every generated `Job` wires in exactly one concrete
   `JobCompletionListener`, not a list of listeners. To customize completion behavior, override
@@ -732,6 +764,22 @@ way:
 
 If you need any of these, open an issue (or a PR) — the annotation processor architecture
 makes most of them additive rather than invasive to add.
+
+---
+
+## Running the test suite
+
+```bash
+mvn test
+```
+
+The test suite includes `AnnotationProcessorCodegenTest`, which compiles a handful of real
+`@BatchJob`/`@BatchExportJob` sample classes (covering plain, `parallelProcessing = true`,
+`notifyOnCompletion`/`notifyOnFailure`, and `dryRun = true` configurations) as part of the
+build. If either annotation processor emits invalid generated source — a bad import, a call
+to a method or constructor that doesn't exist, a type mismatch — `mvn test` fails right here
+with a normal `javac` compiler error, rather than only surfacing in a downstream consumer's
+project.
 
 ---
 

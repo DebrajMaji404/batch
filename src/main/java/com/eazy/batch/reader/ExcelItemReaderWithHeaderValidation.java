@@ -7,10 +7,12 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
 import org.apache.poi.ss.usermodel.*;
 import org.jetbrains.annotations.NotNull;
-import org.springframework.batch.infrastructure.item.ItemReader;
+import org.springframework.batch.infrastructure.item.ExecutionContext;
+import org.springframework.batch.infrastructure.item.ItemStreamException;
+import org.springframework.batch.infrastructure.item.ItemStreamReader;
 import org.springframework.batch.infrastructure.item.file.FlatFileParseException;
-import org.springframework.beans.factory.DisposableBean;
 import org.springframework.core.io.Resource;
+import org.springframework.lang.NonNull;
 
 import java.io.File;
 import java.io.IOException;
@@ -24,9 +26,21 @@ import java.util.*;
  * Row-by-row Excel reader that properly handles skippable exceptions
  * FIXED: Resource leak - now implements DisposableBean
  * FIXED: Empty workbook handling
+ *
+ * <p>NEW: implements {@link ItemStreamReader} for restart support. Excel
+ * sheets support direct row-index access, so on restart {@link #open}
+ * simply resumes {@code currentRowIndex} from the checkpoint stored by
+ * {@link #update} - no need to re-read and discard rows the way the
+ * line-based {@link CSVItemReader} does. Previously this reader only
+ * implemented plain {@code ItemReader}, so a step failure always restarted
+ * the whole file from row 1 regardless of how much had already been
+ * committed.</p>
  */
 @Slf4j
-public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, DisposableBean {
+public class ExcelItemReaderWithHeaderValidation<T> implements ItemStreamReader<T> {
+
+    private static final String ROW_INDEX_KEY = "excel.reader.row.index";
+
     private final File file;
     private final Class<T> type;
     private final String datePattern;
@@ -37,7 +51,6 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
     private Workbook workbook;
     private Sheet sheet;
     private int currentRowIndex = 1; // Start at 1 (skip header at 0)
-    private boolean initialized = false;
 
     public ExcelItemReaderWithHeaderValidation(@NotNull Resource resource, Class<T> type) {
         this(resource, type, 0, null);
@@ -53,7 +66,10 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
             this.datePattern = detectDatePattern(type);
             this.fieldMap = buildFieldMap(type);
 
-            // Validate headers immediately - fail fast for template issues
+            // Validate headers immediately - fail fast for template issues.
+            // This opens and closes its own short-lived Workbook and does
+            // NOT set the `workbook`/`sheet` fields used for actual reading -
+            // those are only opened in open(), per the ItemStream contract.
             validateHeaders(file, type);
 
         } catch (IOException | InvalidFormatException e) {
@@ -61,52 +77,71 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
         }
     }
 
-    private void lazyInitialize() {
-        if (!initialized) {
-            try {
-                this.workbook = WorkbookFactory.create(file);
+    // ─────────────────────────────────────────────────────────────────
+    // ItemStream lifecycle
+    // ─────────────────────────────────────────────────────────────────
 
-                // FIXED: Check if workbook has sheets
-                if (workbook.getNumberOfSheets() == 0) {
-                    throw new InvalidTemplateException("Excel file has no sheets");
-                }
+    @Override
+    public void open(@NonNull ExecutionContext executionContext) throws ItemStreamException {
+        try {
+            this.workbook = WorkbookFactory.create(file);
 
-                // Get sheet by name or index
-                if (sheetName != null && !sheetName.isEmpty()) {
-                    this.sheet = workbook.getSheet(sheetName);
-                    if (this.sheet == null) {
-                        throw new InvalidTemplateException(
-                                "Sheet '" + sheetName + "' not found in workbook"
-                        );
-                    }
-                } else {
-                    if (sheetIndex >= workbook.getNumberOfSheets()) {
-                        throw new InvalidTemplateException(
-                                "Sheet index " + sheetIndex + " out of bounds. " +
-                                "Workbook has " + workbook.getNumberOfSheets() + " sheets"
-                        );
-                    }
-                    this.sheet = workbook.getSheetAt(sheetIndex);
-                }
-
-                this.initialized = true;
-                log.info("Excel reader initialized: {} rows to process",
-                        sheet.getLastRowNum());
-            } catch (Exception e) {
-                closeWorkbook();
-                throw new RuntimeException("Failed to open Excel file", e);
+            if (workbook.getNumberOfSheets() == 0) {
+                throw new InvalidTemplateException("Excel file has no sheets");
             }
+
+            if (sheetName != null && !sheetName.isEmpty()) {
+                this.sheet = workbook.getSheet(sheetName);
+                if (this.sheet == null) {
+                    throw new InvalidTemplateException(
+                            "Sheet '" + sheetName + "' not found in workbook"
+                    );
+                }
+            } else {
+                if (sheetIndex >= workbook.getNumberOfSheets()) {
+                    throw new InvalidTemplateException(
+                            "Sheet index " + sheetIndex + " out of bounds. " +
+                            "Workbook has " + workbook.getNumberOfSheets() + " sheets"
+                    );
+                }
+                this.sheet = workbook.getSheetAt(sheetIndex);
+            }
+
+            log.info("Excel reader initialized: {} rows to process", sheet.getLastRowNum());
+
+            // Restart support: resume from the checkpointed row.
+            if (executionContext.containsKey(ROW_INDEX_KEY)) {
+                this.currentRowIndex = (int) executionContext.getLong(ROW_INDEX_KEY);
+                log.info("Restarting Excel reader at row {}", currentRowIndex);
+            }
+        } catch (Exception e) {
+            closeWorkbook();
+            throw new ItemStreamException("Failed to open Excel file: " + e.getMessage(), e);
         }
     }
 
     @Override
-    public T read() {
-        try {
-            lazyInitialize();
+    public void update(@NonNull ExecutionContext executionContext) throws ItemStreamException {
+        executionContext.putLong(ROW_INDEX_KEY, currentRowIndex);
+    }
 
+    @Override
+    public void close() throws ItemStreamException {
+        closeWorkbook();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Reading
+    // ─────────────────────────────────────────────────────────────────
+
+    @Override
+    public T read() {
+        if (sheet == null) {
+            throw new IllegalStateException("Excel reader not open - open() must be called before read()");
+        }
+
+        try {
             if (currentRowIndex > sheet.getLastRowNum()) {
-                // Close workbook when done
-                closeWorkbook();
                 return null;
             }
 
@@ -401,16 +436,7 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemReader<T>, Di
                 log.warn("Failed to close workbook: {}", e.getMessage());
             } finally {
                 workbook = null;
-                initialized = false;
             }
         }
-    }
-
-    /**
-     * FIXED: Implement DisposableBean to ensure resource cleanup
-     */
-    @Override
-    public void destroy() {
-        closeWorkbook();
     }
 }

@@ -7,7 +7,7 @@
 
     <groupId>com.eazy</groupId>
     <artifactId>eazy-batch-processor</artifactId>
-    <version>1.0.1</version>
+    <version>1.0.2</version>
     <packaging>jar</packaging>
 
     <name>Eazy Batch Processor</name>
@@ -105,6 +105,14 @@
             <version>${spring-boot.version}</version>
         </dependency>
 
+        <!-- Test dependencies: JUnit 5, Mockito, AssertJ (via spring-boot-starter-test) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <version>${spring-boot.version}</version>
+            <scope>test</scope>
+        </dependency>
+
     </dependencies>
 
     <build>
@@ -126,11 +134,29 @@
                             <version>1.18.44</version>
                         </path>
                     </annotationProcessorPaths>
-                    <!-- Disable only BatchJob annotation processing in library -->
-                    <compilerArgs>
-                        <arg>-Aprocessor.skip.batchjob=true</arg>
-                    </compilerArgs>
                 </configuration>
+                <executions>
+                    <!-- Main sources: this library has no @BatchJob/@BatchExportJob
+                         usages of its own, so its own processors are disabled here. -->
+                    <execution>
+                        <id>default-compile</id>
+                        <configuration>
+                            <compilerArgs>
+                                <arg>-Aprocessor.skip.batchjob=true</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </execution>
+                    <!-- Test sources: annotation processing is intentionally left
+                         ENABLED here (no skip flag) so
+                         BatchJobAnnotationProcessorCompilationTest and
+                         BatchExportJobAnnotationProcessorCompilationTest can compile
+                         a real @BatchJob/@BatchExportJob sample and catch generated-
+                         source bugs (bad imports, wrong constructor signatures, etc.)
+                         at test time instead of only in a downstream consumer's build. -->
+                    <execution>
+                        <id>default-testCompile</id>
+                    </execution>
+                </executions>
             </plugin>
 
             <!-- Create sources jar -->

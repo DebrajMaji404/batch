@@ -91,14 +91,20 @@ public @interface BatchJob {
     ReaderType readerType() default ReaderType.FILE;
 
     /**
-     * Enable parallel processing
-     * Default is false
+     * Enable multi-threaded step execution (each chunk processed on its own
+     * thread from the shared batchTaskExecutor pool).
+     * <p>NOTE: the reader is automatically wrapped in Spring Batch's
+     * {@code SynchronizedItemStreamReader}, since the built-in CSV/Excel
+     * readers hold internal state and are not thread-safe on their own.
+     * Default is false.
      */
     boolean parallelProcessing() default false;
 
     /**
-     * Thread pool size for parallel processing
-     * Only used if parallelProcessing = true
+     * Documentation-only for now: concurrency is actually controlled by the
+     * shared {@code batchTaskExecutor} bean's pool size
+     * (eazy.batch.thread-pool-size), not by this value. Only used if
+     * parallelProcessing = true.
      */
     int threadPoolSize() default 4;
 
@@ -152,18 +158,26 @@ public @interface BatchJob {
     int sheetIndex() default 0;
 
     /**
-     * Required job parameters
-     * Job will fail if these are not provided
+     * Required job parameters - the Job will refuse to launch (throwing
+     * JobParametersInvalidException) if any of these keys are missing at
+     * launch time, enforced via a generated DefaultJobParametersValidator.
+     * Defaults to {"filePath"} since the built-in file readers require it.
      */
     String[] requiredParameters() default {"filePath"};
 
     /**
-     * Optional job parameters
+     * Optional job parameters. Combined with requiredParameters() to build
+     * the full accepted parameter set - any parameter NOT listed in either
+     * array will also cause launch to fail (this is DefaultJobParametersValidator's
+     * standard behavior: only known keys are ever accepted).
      */
     String[] optionalParameters() default {};
 
     /**
-     * Enable partitioning for large datasets
+     * Enable partitioning for large datasets.
+     * <p><b>Not implemented yet</b> - setting this to true fails compilation
+     * with a clear error rather than silently doing nothing. See README
+     * "Known limitations".
      * Default is false
      */
     boolean partitioned() default false;
@@ -175,7 +189,13 @@ public @interface BatchJob {
     int partitions() default 4;
 
     /**
-     * Enable incremental processing (resume from last checkpoint)
+     * Enable incremental processing (resume from last checkpoint).
+     * <p><b>Not implemented yet</b> - setting this to true fails compilation
+     * with a clear error rather than silently doing nothing. See README
+     * "Known limitations". (Note: restart-from-last-committed-chunk within a
+     * single failed run IS supported now via ItemStream on the file readers -
+     * this attribute is about a different feature, incremental extraction
+     * keyed off a checkpoint column across separate runs.)
      * Default is false
      */
     boolean incremental() default false;

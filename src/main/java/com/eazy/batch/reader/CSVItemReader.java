@@ -7,10 +7,12 @@ import com.opencsv.exceptions.CsvValidationException;
 import com.poiji.annotation.ExcelCellName;
 import lombok.extern.slf4j.Slf4j;
 import org.jetbrains.annotations.NotNull;
-import org.springframework.batch.infrastructure.item.ItemReader;
+import org.springframework.batch.infrastructure.item.ExecutionContext;
+import org.springframework.batch.infrastructure.item.ItemStreamException;
+import org.springframework.batch.infrastructure.item.ItemStreamReader;
 import org.springframework.batch.infrastructure.item.file.FlatFileParseException;
-import org.springframework.beans.factory.DisposableBean;
 import org.springframework.core.io.Resource;
+import org.springframework.lang.NonNull;
 
 import java.io.FileReader;
 import java.io.IOException;
@@ -20,57 +22,101 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 /**
- * CSV Item Reader with header validation
- * NEW FEATURE: CSV file support
+ * CSV Item Reader with header validation.
+ *
+ * <p>NEW: implements {@link ItemStreamReader} for restart support. Row
+ * position is checkpointed into the {@link ExecutionContext} after every
+ * chunk (via Spring Batch's own step lifecycle calling {@link #update}), and
+ * on a restart {@link #open} fast-forwards past already-processed rows by
+ * re-reading and discarding them (CSV has no native random-seek, so this is
+ * the standard technique for line-based restartable readers). Previously
+ * this reader only implemented plain {@code ItemReader}, so a step failure
+ * always restarted the whole file from row 0 regardless of how much had
+ * already been committed.</p>
+ *
+ * <p>File I/O is deferred from the constructor to {@link #open}, matching
+ * the {@code ItemStream} contract (a reader should be constructible without
+ * side effects, and only touch its resource once the step is actually
+ * executing) - the constructor now only validates arguments and builds the
+ * (pure, no I/O) field-mapping metadata.</p>
  */
 @Slf4j
-public class CSVItemReader<T> implements ItemReader<T>, DisposableBean {
+public class CSVItemReader<T> implements ItemStreamReader<T> {
 
+    private static final String ROW_INDEX_KEY = "csv.reader.row.index";
+
+    private final Resource resource;
     private final Class<T> type;
     private final String datePattern;
-    private final Map<String, Integer> headerIndexMap;
     private final Map<String, Field> fieldMap;
+    private final Map<String, Integer> headerIndexMap = new HashMap<>();
 
     private CSVReader csvReader;
     private String[] headers;
     private int currentRowIndex = 0;
-    private boolean initialized = false;
 
     public CSVItemReader(@NotNull Resource resource, Class<T> type) {
-        try {
-            this.type = type;
-            this.datePattern = detectDatePattern(type);
-            this.fieldMap = buildFieldMap(type);
-            this.headerIndexMap = new HashMap<>();
+        this.resource = resource;
+        this.type = type;
+        this.datePattern = detectDatePattern(type);
+        this.fieldMap = buildFieldMap(type);
+    }
 
-            // Initialize CSV reader
+    // ─────────────────────────────────────────────────────────────────
+    // ItemStream lifecycle
+    // ─────────────────────────────────────────────────────────────────
+
+    @Override
+    public void open(@NonNull ExecutionContext executionContext) throws ItemStreamException {
+        try {
             this.csvReader = new CSVReader(new FileReader(resource.getFile()));
 
-            // Read and validate headers
             this.headers = csvReader.readNext();
             if (headers == null || headers.length == 0) {
                 throw new InvalidTemplateException("CSV file does not contain headers");
             }
-
-            // Build header index map
             for (int i = 0; i < headers.length; i++) {
                 headerIndexMap.put(headers[i].trim(), i);
             }
-
             validateHeaders();
-            this.initialized = true;
 
             log.info("✅ CSV reader initialized with {} columns", headers.length);
 
+            // Restart support: fast-forward past already-processed rows.
+            if (executionContext.containsKey(ROW_INDEX_KEY)) {
+                long alreadyRead = executionContext.getLong(ROW_INDEX_KEY);
+                log.info("Restarting CSV reader - skipping {} already-processed row(s)", alreadyRead);
+                for (long i = 0; i < alreadyRead; i++) {
+                    if (csvReader.readNext() == null) {
+                        log.warn("CSV file has fewer rows than the restart checkpoint ({}); stopping fast-forward early", alreadyRead);
+                        break;
+                    }
+                }
+                this.currentRowIndex = (int) alreadyRead;
+            }
         } catch (IOException | CsvValidationException e) {
-            throw new RuntimeException("Failed to read CSV file", e);
+            throw new ItemStreamException("Failed to open CSV file: " + e.getMessage(), e);
         }
     }
 
     @Override
+    public void update(@NonNull ExecutionContext executionContext) throws ItemStreamException {
+        executionContext.putLong(ROW_INDEX_KEY, currentRowIndex);
+    }
+
+    @Override
+    public void close() throws ItemStreamException {
+        closeReader();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Reading
+    // ─────────────────────────────────────────────────────────────────
+
+    @Override
     public T read() {
-        if (!initialized) {
-            throw new IllegalStateException("CSV reader not initialized");
+        if (csvReader == null) {
+            throw new IllegalStateException("CSV reader not open - open() must be called before read()");
         }
 
         try {
@@ -78,7 +124,6 @@ public class CSVItemReader<T> implements ItemReader<T>, DisposableBean {
 
             if (row == null) {
                 // End of file
-                closeReader();
                 return null;
             }
 
@@ -285,10 +330,5 @@ public class CSVItemReader<T> implements ItemReader<T>, DisposableBean {
                 csvReader = null;
             }
         }
-    }
-
-    @Override
-    public void destroy() {
-        closeReader();
     }
 }

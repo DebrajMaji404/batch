@@ -96,6 +96,16 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
         int retryLimit = annotation.retryLimit();
         String[] retryableExceptions = annotation.retryableExceptions();
         boolean cacheValidation = annotation.cacheValidation();
+        String[] requiredParameters = annotation.requiredParameters();
+        String[] optionalParameters = annotation.optionalParameters();
+        boolean parallelProcessing = annotation.parallelProcessing();
+        int threadPoolSize = annotation.threadPoolSize();
+        boolean partitioned = annotation.partitioned();
+        boolean incremental = annotation.incremental();
+        boolean notifyOnCompletion = annotation.notifyOnCompletion();
+        boolean notifyOnFailure = annotation.notifyOnFailure();
+        String[] recipients = annotation.recipients();
+        boolean hasNotification = notifyOnCompletion || notifyOnFailure;
 
         // Extract class names
         String dtoClassFqn = getClassFqn(annotation, "dtoClass");
@@ -104,15 +114,26 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
         String wrapperClassName = getSimpleName(wrapperClassFqn);
 
         // Validate and generate
-        validateConfiguration(jobName, stepName, dtoClassName, wrapperClassName, chunkSize, skipLimit, fileType, readerType);
-        generateJobConfiguration(packageName, className, jobName, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn, chunkSize, skipLimit, enableRetry, retryLimit, retryableExceptions);
+        validateConfiguration(jobName, stepName, dtoClassName, wrapperClassName, chunkSize, skipLimit, fileType, readerType, partitioned, incremental);
+        // FIXED: notifyOnCompletion/notifyOnFailure/recipients were declared
+        // on @BatchJob since the beginning but never actually wired to
+        // anything in this branch's processor - setting them had zero
+        // effect. Now generates and attaches a real notification listener.
+        if (hasNotification && (recipients == null || recipients.length == 0)) {
+            throw new IllegalArgumentException(
+                    "notifyOnCompletion/notifyOnFailure is true but recipients() is empty on @BatchJob for " + className);
+        }
+        generateJobConfiguration(packageName, className, jobName, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn, chunkSize, skipLimit, enableRetry, retryLimit, retryableExceptions, requiredParameters, optionalParameters, parallelProcessing, threadPoolSize, hasNotification);
         generateReader(packageName, className, stepName, dtoClassName, dtoClassFqn, fileType, sheetName, sheetIndex);
         generateProcessor(packageName, className, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn, dryRun, cacheValidation);
         generateWriter(packageName, className, stepName, wrapperClassName, wrapperClassFqn, dryRun);
         generateSkipListener(packageName, className, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn);
+        if (hasNotification) {
+            generateNotificationListener(packageName, className, jobName, notifyOnCompletion, notifyOnFailure, recipients);
+        }
     }
 
-    private void validateConfiguration(String jobName, String stepName, String dtoClassName, String wrapperClassName, int chunkSize, int skipLimit, FileType fileType, ReaderType readerType) {
+    private void validateConfiguration(String jobName, String stepName, String dtoClassName, String wrapperClassName, int chunkSize, int skipLimit, FileType fileType, ReaderType readerType, boolean partitioned, boolean incremental) {
         if (jobName == null || jobName.trim().isEmpty()) throw new IllegalArgumentException("jobName cannot be empty");
         if (stepName == null || stepName.trim().isEmpty()) throw new IllegalArgumentException("stepName cannot be empty");
         if (chunkSize != -1 && chunkSize <= 0) throw new IllegalArgumentException("chunkSize must be positive (or -1 to use eazy.batch.default-chunk-size)");
@@ -132,9 +153,21 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             throw new IllegalArgumentException(
                     "fileType=" + fileType + " is not implemented yet. Only FileType.CSV and FileType.EXCEL are currently supported.");
         }
+        // FIXED: partitioned/incremental were declared but silently ignored -
+        // set them to true and nothing happened, no partition handler or
+        // checkpoint logic was ever generated. Fail fast instead, consistent
+        // with the readerType/fileType checks above.
+        if (partitioned) {
+            throw new IllegalArgumentException(
+                    "partitioned=true is not implemented yet. Remove it (or set it to false) - see README 'Known limitations'.");
+        }
+        if (incremental) {
+            throw new IllegalArgumentException(
+                    "incremental=true is not implemented yet. Remove it (or set it to false) - see README 'Known limitations'.");
+        }
     }
 
-    private void generateJobConfiguration(String packageName, String className, String jobName, String stepName, String dtoClassName, String wrapperClassName, String dtoClassFqn, String wrapperClassFqn, int chunkSize, int skipLimit, boolean enableRetry, int retryLimit, String[] retryableExceptions) throws IOException {
+    private void generateJobConfiguration(String packageName, String className, String jobName, String stepName, String dtoClassName, String wrapperClassName, String dtoClassFqn, String wrapperClassFqn, int chunkSize, int skipLimit, boolean enableRetry, int retryLimit, String[] retryableExceptions, String[] requiredParameters, String[] optionalParameters, boolean parallelProcessing, int threadPoolSize, boolean hasNotification) throws IOException {
         String generatedClassName = className + "Configuration";
         JavaFileObject file = processingEnv.getFiler().createSourceFile(packageName + "." + generatedClassName);
 
@@ -147,6 +180,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import lombok.RequiredArgsConstructor;");
             out.println("import lombok.extern.slf4j.Slf4j;");
             out.println("import org.springframework.batch.core.job.Job;");
+            out.println("import org.springframework.batch.core.job.parameters.DefaultJobParametersValidator;");
             out.println("import org.springframework.batch.core.listener.SkipListener;");
             out.println("import org.springframework.batch.core.step.Step;");
             out.println("import org.springframework.batch.core.job.builder.JobBuilder;");
@@ -157,8 +191,13 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import org.springframework.batch.core.step.skip.LimitCheckingExceptionHierarchySkipPolicy;");
             out.println("import java.util.Set;");
             out.println("import org.springframework.batch.infrastructure.item.ItemProcessor;");
-            out.println("import org.springframework.batch.infrastructure.item.ItemReader;");
+            out.println("import org.springframework.batch.infrastructure.item.ItemStreamReader;");
             out.println("import org.springframework.batch.infrastructure.item.ItemWriter;");
+            if (parallelProcessing) {
+                out.println("import org.springframework.batch.infrastructure.item.support.SynchronizedItemStreamReaderBuilder;");
+                out.println("import org.springframework.beans.factory.annotation.Qualifier;");
+                out.println("import org.springframework.core.task.TaskExecutor;");
+            }
             out.println("import org.springframework.context.annotation.Bean;");
             out.println("import org.springframework.context.annotation.Configuration;");
             out.println("import org.springframework.transaction.PlatformTransactionManager;");
@@ -179,33 +218,63 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(INDENT + "private final BatchProcessorProperties batchProcessorProperties;");
             out.println();
             out.println(INDENT + "@Bean");
-            out.println(INDENT + "public Job " + jobName + "(Step " + stepName + ") {");
+            out.println(INDENT + "public Job " + jobName + "(Step " + stepName + (hasNotification ? ", " + className + "NotificationListener notificationListener" : "") + ") {");
             out.println(DOUBLE_INDENT + "log.info(\"Initializing batch job: {}\", \"" + jobName + "\");");
-            out.println(DOUBLE_INDENT + "return new JobBuilder(\"" + jobName + "\", jobRepository)");
+            out.println(DOUBLE_INDENT + "var jobBuilder = new JobBuilder(\"" + jobName + "\", jobRepository)");
             out.println(QUAD_INDENT + ".listener(jobCompletionListener)");
-            out.println(QUAD_INDENT + ".start(" + stepName + ")");
-            out.println(QUAD_INDENT + ".build();");
+            if (hasNotification) {
+                out.println(QUAD_INDENT + ".listener(notificationListener)");
+            }
+            out.println(QUAD_INDENT + ".start(" + stepName + ");");
+            if (requiredParameters.length > 0 || optionalParameters.length > 0) {
+                // NEW: requiredParameters()/optionalParameters() were declared
+                // on @BatchJob but never actually enforced anywhere - the job
+                // would happily run with missing/misspelled job parameters.
+                out.println(DOUBLE_INDENT + "jobBuilder = jobBuilder.validator(new DefaultJobParametersValidator(");
+                out.println(TRIPLE_INDENT + "new String[]{" + joinQuoted(requiredParameters) + "},");
+                out.println(TRIPLE_INDENT + "new String[]{" + joinQuoted(optionalParameters) + "}));");
+            }
+            out.println(DOUBLE_INDENT + "return jobBuilder.build();");
             out.println(INDENT + "}");
             out.println();
             out.println(INDENT + "@Bean");
             out.println(INDENT + "public Step " + stepName + "(");
-            out.println(TRIPLE_INDENT + "ItemReader<" + dtoClassName + "> reader,");
+            out.println(TRIPLE_INDENT + "ItemStreamReader<" + dtoClassName + "> reader,");
             out.println(TRIPLE_INDENT + "ItemProcessor<" + dtoClassName + ", " + wrapperClassName + "> processor,");
             out.println(TRIPLE_INDENT + "ItemWriter<" + wrapperClassName + "> writer,");
             out.println(TRIPLE_INDENT + "SkipListener<" + dtoClassName + ", " + wrapperClassName + "> skipListener,");
+            if (parallelProcessing) {
+                out.println(TRIPLE_INDENT + "@Qualifier(\"batchTaskExecutor\") TaskExecutor taskExecutor,");
+            }
             out.println(TRIPLE_INDENT + "BatchProgressChunkListener progressChunkListener) {");
             out.println(DOUBLE_INDENT + "log.info(\"Initializing batch step: {}\", \"" + stepName + "\");");
             out.println(DOUBLE_INDENT + "int effectiveChunkSize = " + (chunkSize == -1 ? "batchProcessorProperties.getDefaultChunkSize();" : chunkSize + ";"));
             out.println(DOUBLE_INDENT + "int effectiveSkipLimit = " + (skipLimit == -1 ? "batchProcessorProperties.getDefaultSkipLimit();" : skipLimit + ";"));
             out.println(DOUBLE_INDENT + "var skipPolicy = new LimitCheckingExceptionHierarchySkipPolicy(");
             out.println(TRIPLE_INDENT + "Set.of(Exception.class), effectiveSkipLimit);");
+            if (parallelProcessing) {
+                // NEW: parallelProcessing()/threadPoolSize() were declared on
+                // @BatchJob but never wired to anything - the step always ran
+                // single-threaded regardless. A custom reader like this one
+                // (CSVItemReader/ExcelItemReaderWithHeaderValidation) is
+                // stateful and NOT thread-safe on its own, so it's wrapped in
+                // SynchronizedItemStreamReader (Spring Batch's own recommended
+                // pattern for this) before being handed to a multi-threaded
+                // step. Concurrency is controlled by the injected
+                // batchTaskExecutor's pool size, sized from
+                // eazy.batch.thread-pool-size (threadPoolSize() on the
+                // annotation is documentation-only for now, matching that
+                // shared executor's own sizing).
+                out.println(DOUBLE_INDENT + "ItemStreamReader<" + dtoClassName + "> synchronizedReader =");
+                out.println(TRIPLE_INDENT + "new SynchronizedItemStreamReaderBuilder<" + dtoClassName + ">().delegate(reader).build();");
+            }
             // FIXED: ChunkOrientedStepBuilder has no (String, JobRepository, int)
             // constructor - only (String, JobRepository, PlatformTransactionManager, int)
             // and (JobRepository, PlatformTransactionManager, int). The old code
             // called a non-existent 3-arg overload and then a separate
             // .transactionManager(...) chain call, which would not compile.
             out.println(DOUBLE_INDENT + "return new ChunkOrientedStepBuilder<" + dtoClassName + ", " + wrapperClassName + ">(\"" + stepName + "\", jobRepository, transactionManager, effectiveChunkSize)");
-            out.println(TRIPLE_INDENT + ".reader(reader)");
+            out.println(TRIPLE_INDENT + ".reader(" + (parallelProcessing ? "synchronizedReader" : "reader") + ")");
             out.println(TRIPLE_INDENT + ".processor(processor)");
             out.println(TRIPLE_INDENT + ".writer(writer)");
             out.println(TRIPLE_INDENT + ".faultTolerant()");
@@ -213,6 +282,9 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(TRIPLE_INDENT + ".listener(skipListener)");
             // NEW: live progress push over WebSocket after every chunk.
             out.println(TRIPLE_INDENT + ".listener(progressChunkListener)");
+            if (parallelProcessing) {
+                out.println(TRIPLE_INDENT + ".taskExecutor(taskExecutor)");
+            }
             out.println(TRIPLE_INDENT + ".build();");
             out.println(INDENT + "}");
             out.println("}");
@@ -423,6 +495,57 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
         }
     }
 
+    private void generateNotificationListener(String packageName, String className, String jobName, boolean notifyOnCompletion, boolean notifyOnFailure, String[] recipients) throws IOException {
+        String generatedClassName = className + "NotificationListener";
+        JavaFileObject file = processingEnv.getFiler().createSourceFile(packageName + "." + generatedClassName);
+
+        try (PrintWriter out = new PrintWriter(file.openWriter())) {
+            out.println("package " + packageName + ";");
+            out.println();
+            out.println("import com.eazy.batch.service.EmailNotificationService;");
+            out.println("import lombok.RequiredArgsConstructor;");
+            out.println("import lombok.extern.slf4j.Slf4j;");
+            out.println("import org.springframework.batch.core.BatchStatus;");
+            out.println("import org.springframework.batch.core.job.JobExecution;");
+            out.println("import org.springframework.batch.core.listener.JobExecutionListener;");
+            out.println("import org.springframework.lang.NonNull;");
+            out.println("import org.springframework.stereotype.Component;");
+            out.println("import java.time.Duration;");
+            out.println("import java.time.ZoneOffset;");
+            out.println();
+            out.println("/** Auto-generated notification listener for " + className + " — DO NOT MODIFY */");
+            out.println("@Slf4j");
+            out.println("@Component");
+            out.println("@RequiredArgsConstructor");
+            out.println("public class " + generatedClassName + " implements JobExecutionListener {");
+            out.println();
+            out.println(INDENT + "private final EmailNotificationService emailNotificationService;");
+            out.println(INDENT + "private static final String[] RECIPIENTS = " + arrayLiteral(recipients) + ";");
+            out.println();
+            out.println(INDENT + "@Override");
+            out.println(INDENT + "public void afterJob(@NonNull JobExecution jobExecution) {");
+            out.println(DOUBLE_INDENT + "Duration duration = Duration.ZERO;");
+            out.println(DOUBLE_INDENT + "if (jobExecution.getStartTime() != null && jobExecution.getEndTime() != null) {");
+            out.println(TRIPLE_INDENT + "duration = Duration.between(jobExecution.getStartTime().toInstant(ZoneOffset.UTC), jobExecution.getEndTime().toInstant(ZoneOffset.UTC));");
+            out.println(DOUBLE_INDENT + "}");
+            out.println(DOUBLE_INDENT + "long processed = jobExecution.getStepExecutions().stream().mapToLong(se -> se.getWriteCount()).sum();");
+            out.println(DOUBLE_INDENT + "long skipped = jobExecution.getStepExecutions().stream().mapToLong(se -> se.getSkipCount()).sum();");
+            if (notifyOnCompletion) {
+                out.println(DOUBLE_INDENT + "if (jobExecution.getStatus() == BatchStatus.COMPLETED) {");
+                out.println(TRIPLE_INDENT + "emailNotificationService.sendJobCompletionEmail(\"" + jobName + "\", RECIPIENTS, processed, skipped, duration.toString());");
+                out.println(DOUBLE_INDENT + "}");
+            }
+            if (notifyOnFailure) {
+                out.println(DOUBLE_INDENT + "if (jobExecution.getStatus() == BatchStatus.FAILED) {");
+                out.println(TRIPLE_INDENT + "String errorMessage = jobExecution.getAllFailureExceptions().isEmpty() ? \"Unknown error\" : jobExecution.getAllFailureExceptions().get(0).getMessage();");
+                out.println(TRIPLE_INDENT + "emailNotificationService.sendJobFailureEmail(\"" + jobName + "\", RECIPIENTS, errorMessage);");
+                out.println(DOUBLE_INDENT + "}");
+            }
+            out.println(INDENT + "}");
+            out.println("}");
+        }
+    }
+
     private @Nullable String getClassFqn(BatchJob annotation, String methodName) {
         try {
             if ("dtoClass".equals(methodName)) annotation.dtoClass(); else annotation.wrapperClass();
@@ -436,6 +559,30 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
         if (fqn == null || fqn.isEmpty()) return "";
         int lastDot = fqn.lastIndexOf('.');
         return lastDot >= 0 ? fqn.substring(lastDot + 1) : fqn;
+    }
+
+    /**
+     * Renders a String[] annotation attribute as a comma-separated, quoted
+     * Java literal fragment, e.g. {@code ["a","b"]} -> {@code "a", "b"}.
+     * Used to embed requiredParameters()/optionalParameters() into
+     * generated source as a {@code new String[]{...}} literal.
+     */
+    private String joinQuoted(String[] values) {
+        if (values == null || values.length == 0) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < values.length; i++) {
+            if (i > 0) sb.append(", ");
+            sb.append("\"").append(values[i].replace("\"", "\\\"")).append("\"");
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Renders a String[] annotation attribute as a full Java array literal,
+     * e.g. {@code ["a","b"]} -> {@code new String[] {"a", "b"}}.
+     */
+    private String arrayLiteral(String[] values) {
+        return "new String[] {" + joinQuoted(values) + "}";
     }
 
     private void logInfo(String message) {
