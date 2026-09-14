@@ -21,6 +21,23 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
 
+    <!-- Imports Spring Boot's managed dependency versions, so test-only
+         Spring Batch artifacts (spring-batch-test) automatically align with
+         whatever Spring Batch version spring-boot-starter-batch pulls in for
+         4.0.2, instead of us having to track and hardcode that version
+         separately (this project doesn't use spring-boot-starter-parent). -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <dependencies>
         <!-- Spring Boot Dependencies -->
         <dependency>
@@ -113,6 +130,18 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- MetaDataInstanceFactory etc. - Spring Batch's own official test
+             utilities for building JobExecution/StepExecution test fixtures
+             without hand-rolling domain-object constructors (which are
+             version-sensitive - e.g. entity IDs changed from Long to
+             primitive long between Spring Batch 5 and 6). Version comes from
+             the spring-boot-dependencies BOM imported above. -->
+        <dependency>
+            <groupId>org.springframework.batch</groupId>
+            <artifactId>spring-batch-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
     </dependencies>
 
     <build>
@@ -126,33 +155,50 @@
                     <source>21</source>
                     <target>21</target>
                     <encoding>UTF-8</encoding>
-                    <!-- Enable Lombok annotation processing but disable custom processors -->
-                    <annotationProcessorPaths>
-                        <path>
-                            <groupId>org.projectlombok</groupId>
-                            <artifactId>lombok</artifactId>
-                            <version>1.18.44</version>
-                        </path>
-                    </annotationProcessorPaths>
                 </configuration>
                 <executions>
                     <!-- Main sources: this library has no @BatchJob/@BatchExportJob
-                         usages of its own, so its own processors are disabled here. -->
+                         usages of its own. annotationProcessorPaths is scoped to ONLY
+                         this execution (not the plugin-level <configuration>, and NOT
+                         inherited by default-testCompile below) - setting
+                         annotationProcessorPaths at all switches javac from classpath-
+                         based processor auto-discovery to ONLY the listed path, so if
+                         this were left at the plugin level it would silently exclude
+                         our own BatchJobAnnotationProcessor/BatchExportJobAnnotationProcessor
+                         (registered via META-INF/services, normally found via the
+                         classpath) from test compilation too - which is exactly what
+                         happened before this fix: every AnnotationProcessorCodegenTest
+                         fixture's generated companion class was missing at test time,
+                         because the processors never ran, while everything else still
+                         "compiled" fine since an unprocessed @BatchJob annotation isn't
+                         a syntax error on its own. -->
                     <execution>
                         <id>default-compile</id>
                         <configuration>
+                            <annotationProcessorPaths>
+                                <path>
+                                    <groupId>org.projectlombok</groupId>
+                                    <artifactId>lombok</artifactId>
+                                    <version>1.18.44</version>
+                                </path>
+                            </annotationProcessorPaths>
                             <compilerArgs>
                                 <arg>-Aprocessor.skip.batchjob=true</arg>
                             </compilerArgs>
                         </configuration>
                     </execution>
-                    <!-- Test sources: annotation processing is intentionally left
-                         ENABLED here (no skip flag) so
-                         BatchJobAnnotationProcessorCompilationTest and
-                         BatchExportJobAnnotationProcessorCompilationTest can compile
-                         a real @BatchJob/@BatchExportJob sample and catch generated-
-                         source bugs (bad imports, wrong constructor signatures, etc.)
-                         at test time instead of only in a downstream consumer's build. -->
+                    <!-- Test sources: deliberately NO annotationProcessorPaths override
+                         here, so javac falls back to normal classpath-based processor
+                         discovery - this picks up BOTH lombok (provided-scope dependency
+                         jar has its own SPI registration) AND our own
+                         BatchJobAnnotationProcessor/BatchExportJobAnnotationProcessor
+                         (via target/classes' META-INF/services/javax.annotation.processing.Processor,
+                         already built by the time testCompile runs), so
+                         AnnotationProcessorCodegenTest's fixtures actually get their
+                         generated companion classes produced and this catches
+                         generated-source bugs (bad imports, wrong constructor
+                         signatures, etc.) at test time instead of only in a downstream
+                         consumer's build. -->
                     <execution>
                         <id>default-testCompile</id>
                     </execution>

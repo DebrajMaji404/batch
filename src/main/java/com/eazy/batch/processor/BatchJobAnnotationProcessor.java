@@ -194,7 +194,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import org.springframework.batch.infrastructure.item.ItemStreamReader;");
             out.println("import org.springframework.batch.infrastructure.item.ItemWriter;");
             if (parallelProcessing) {
-                out.println("import org.springframework.batch.infrastructure.item.support.SynchronizedItemStreamReaderBuilder;");
+                out.println("import org.springframework.batch.infrastructure.item.support.builder.SynchronizedItemStreamReaderBuilder;");
                 out.println("import org.springframework.beans.factory.annotation.Qualifier;");
                 out.println("import org.springframework.core.task.TaskExecutor;");
             }

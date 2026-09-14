@@ -4,10 +4,9 @@ import com.eazy.batch.dto.BatchSkippedItem;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.batch.core.job.JobExecution;
-import org.springframework.batch.core.job.JobInstance;
-import org.springframework.batch.core.job.parameters.JobParameters;
 import org.springframework.batch.core.scope.context.StepSynchronizationManager;
 import org.springframework.batch.core.step.StepExecution;
+import org.springframework.batch.test.MetaDataInstanceFactory;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.time.Duration;
@@ -28,18 +27,16 @@ class BatchUtilityTest {
     }
 
     /**
-     * NOTE: JobInstance/JobExecution/StepExecution constructor signatures here
-     * are sourced from Spring Batch's own "Unit Testing" reference docs
-     * (the same pattern used in their NoWorkFoundStepExecutionListener
-     * example: {@code new JobInstance(id, jobParameters, jobName)} and
-     * {@code new JobExecution(jobInstance, id, jobParameters)}). If a future
-     * Spring Batch release changes these constructors, this helper - not the
-     * assertions below it - is the single place to update.
+     * Uses Spring Batch's own MetaDataInstanceFactory (org.springframework.batch.test)
+     * rather than hand-constructing JobInstance/JobExecution/StepExecution
+     * directly - those domain-object constructors are version-sensitive
+     * (e.g. entity IDs changed from the Long wrapper to primitive long
+     * between Spring Batch 5 and 6), whereas MetaDataInstanceFactory is the
+     * officially documented, maintained way to build test fixtures for them.
      */
     private StepExecution registerFakeStepContext(long jobExecutionId) {
-        JobInstance jobInstance = new JobInstance(1L, new JobParameters(), "testJob");
-        JobExecution jobExecution = new JobExecution(jobInstance, jobExecutionId, new JobParameters());
-        StepExecution stepExecution = new StepExecution("testStep", jobExecution);
+        JobExecution jobExecution = MetaDataInstanceFactory.createJobExecution("testJob", 1L, jobExecutionId);
+        StepExecution stepExecution = MetaDataInstanceFactory.createStepExecution(jobExecution, "testStep", 1L);
         StepSynchronizationManager.register(stepExecution);
         return stepExecution;
     }
