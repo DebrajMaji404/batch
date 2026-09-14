@@ -163,7 +163,13 @@ class BatchUtilityTest {
         BatchUtility.saveWithFallback(entities, repository);
 
         verify(repository, times(1)).saveAll(entities);
+        // FIXED (this review): saveAll() alone doesn't force Hibernate to
+        // execute the actual INSERTs - flush() does, and is what lets a
+        // constraint violation be caught here instead of surfacing later
+        // at transaction-commit time, outside this method entirely.
+        verify(repository, times(1)).flush();
         verify(repository, never()).save(any());
+        verify(repository, never()).saveAndFlush(any());
     }
 
     @SuppressWarnings("unchecked")
@@ -173,16 +179,19 @@ class BatchUtilityTest {
 
         JpaRepository<String, ?> repository = mock(JpaRepository.class);
         doThrow(new RuntimeException("bulk insert failed")).when(repository).saveAll(anyList());
-        // "bad" fails individually, the rest succeed
-        doThrow(new RuntimeException("constraint violation")).when(repository).save("bad");
+        // "bad" fails individually, the rest succeed. FIXED (this review):
+        // the fallback loop now calls saveAndFlush(), not save() - stubbing
+        // save() here would silently no-op instead of throwing, since
+        // saveAndFlush() is a distinct mock method.
+        doThrow(new RuntimeException("constraint violation")).when(repository).saveAndFlush("bad");
 
         List<String> entities = List.of("good1", "bad", "good2");
 
         BatchUtility.saveWithFallback(entities, repository);
 
-        verify(repository, times(1)).save("good1");
-        verify(repository, times(1)).save("bad");
-        verify(repository, times(1)).save("good2");
+        verify(repository, times(1)).saveAndFlush("good1");
+        verify(repository, times(1)).saveAndFlush("bad");
+        verify(repository, times(1)).saveAndFlush("good2");
 
         // FIXED (earlier review): individual failures inside saveWithFallback
         // are recorded via addSkippedItem, since they can never trigger

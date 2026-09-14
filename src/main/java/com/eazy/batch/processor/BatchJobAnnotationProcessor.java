@@ -137,11 +137,11 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
         if (jobName == null || jobName.trim().isEmpty()) throw new IllegalArgumentException("jobName cannot be empty");
         if (stepName == null || stepName.trim().isEmpty()) throw new IllegalArgumentException("stepName cannot be empty");
         if (chunkSize != -1 && chunkSize <= 0) throw new IllegalArgumentException("chunkSize must be positive (or -1 to use eazy.batch.default-chunk-size)");
-        // FIXED: Spring Batch 6's LimitCheckingExceptionHierarchySkipPolicy
-        // (used below) throws "skipLimit must be greater than zero" at
-        // context-startup time if skipLimit is 0. The old check only
-        // rejected negative values, so skipLimit=0 passed compile-time
-        // validation here and then crashed the app at runtime.
+        // FIXED: Spring Batch 6's skip-limit enforcement rejects a skipLimit
+        // of exactly 0 at context-startup time ("skipLimit must be greater
+        // than zero"). The old check here only rejected negative values, so
+        // skipLimit=0 passed compile-time validation and then crashed the
+        // app at runtime.
         if (skipLimit != -1 && skipLimit <= 0) throw new IllegalArgumentException("skipLimit must be greater than zero (or -1 to use eazy.batch.default-skip-limit)");
         // FIXED: fail fast at compile time instead of silently generating the
         // wrong reader (or one that doesn't exist) at runtime.
@@ -187,9 +187,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import com.eazy.batch.listener.JobCompletionListener;");
             out.println("import com.eazy.batch.listener.BatchProgressChunkListener;");
             out.println("import org.springframework.batch.core.repository.JobRepository;");
-            out.println("import org.springframework.batch.core.step.builder.ChunkOrientedStepBuilder;");
-            out.println("import org.springframework.batch.core.step.skip.LimitCheckingExceptionHierarchySkipPolicy;");
-            out.println("import java.util.Set;");
+            out.println("import org.springframework.batch.core.step.builder.StepBuilder;");
             out.println("import org.springframework.batch.infrastructure.item.ItemProcessor;");
             out.println("import org.springframework.batch.infrastructure.item.ItemStreamReader;");
             out.println("import org.springframework.batch.infrastructure.item.ItemWriter;");
@@ -250,8 +248,6 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(DOUBLE_INDENT + "log.info(\"Initializing batch step: {}\", \"" + stepName + "\");");
             out.println(DOUBLE_INDENT + "int effectiveChunkSize = " + (chunkSize == -1 ? "batchProcessorProperties.getDefaultChunkSize();" : chunkSize + ";"));
             out.println(DOUBLE_INDENT + "int effectiveSkipLimit = " + (skipLimit == -1 ? "batchProcessorProperties.getDefaultSkipLimit();" : skipLimit + ";"));
-            out.println(DOUBLE_INDENT + "var skipPolicy = new LimitCheckingExceptionHierarchySkipPolicy(");
-            out.println(TRIPLE_INDENT + "Set.of(Exception.class), effectiveSkipLimit);");
             if (parallelProcessing) {
                 // NEW: parallelProcessing()/threadPoolSize() were declared on
                 // @BatchJob but never wired to anything - the step always ran
@@ -268,17 +264,23 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
                 out.println(DOUBLE_INDENT + "ItemStreamReader<" + dtoClassName + "> synchronizedReader =");
                 out.println(TRIPLE_INDENT + "new SynchronizedItemStreamReaderBuilder<" + dtoClassName + ">().delegate(reader).build();");
             }
-            // FIXED: ChunkOrientedStepBuilder has no (String, JobRepository, int)
-            // constructor - only (String, JobRepository, PlatformTransactionManager, int)
-            // and (JobRepository, PlatformTransactionManager, int). The old code
-            // called a non-existent 3-arg overload and then a separate
-            // .transactionManager(...) chain call, which would not compile.
-            out.println(DOUBLE_INDENT + "return new ChunkOrientedStepBuilder<" + dtoClassName + ", " + wrapperClassName + ">(\"" + stepName + "\", jobRepository, transactionManager, effectiveChunkSize)");
+            // FIXED: previously called new ChunkOrientedStepBuilder<>(name, jobRepository,
+            // transactionManager, chunkSize) directly, guessing at a constructor
+            // signature that doesn't exist ("no suitable constructor found").
+            // Switched to the same StepBuilder(name, jobRepository) entry point +
+            // deprecated-but-functional .chunk(chunkSize, transactionManager) overload
+            // already used (and confirmed compiling) in the @BatchExportJob-generated
+            // Step below, instead of guessing at ChunkOrientedStepBuilder's
+            // constructor a third time. Same reasoning for .skipLimit(...).skip(...)
+            // in place of manually constructing a LimitCheckingExceptionHierarchySkipPolicy.
+            out.println(DOUBLE_INDENT + "return new StepBuilder(\"" + stepName + "\", jobRepository)");
+            out.println(TRIPLE_INDENT + ".<" + dtoClassName + ", " + wrapperClassName + ">chunk(effectiveChunkSize, transactionManager)");
             out.println(TRIPLE_INDENT + ".reader(" + (parallelProcessing ? "synchronizedReader" : "reader") + ")");
             out.println(TRIPLE_INDENT + ".processor(processor)");
             out.println(TRIPLE_INDENT + ".writer(writer)");
             out.println(TRIPLE_INDENT + ".faultTolerant()");
-            out.println(TRIPLE_INDENT + ".skipPolicy(skipPolicy)");
+            out.println(TRIPLE_INDENT + ".skipLimit(effectiveSkipLimit)");
+            out.println(TRIPLE_INDENT + ".skip(Exception.class)");
             out.println(TRIPLE_INDENT + ".listener(skipListener)");
             // NEW: live progress push over WebSocket after every chunk.
             out.println(TRIPLE_INDENT + ".listener(progressChunkListener)");

@@ -293,8 +293,23 @@ public class BatchUtility {
     }
 
     /**
-     * Save entities with fallback to individual saves on batch failure
-     * FIXED: Better error handling and reporting
+     * Save entities with fallback to individual saves on batch failure.
+     *
+     * <p><b>Known limitation:</b> the fallback loop calls {@code saveAndFlush()}
+     * per entity so a constraint violation is caught and attributed to the
+     * specific entity that caused it, rather than surfacing later (deferred
+     * to commit time) where it's impossible to tell which entity was at
+     * fault. However, all saves in this loop still share the same
+     * transaction (Spring Batch's chunk-scoped transaction around the
+     * whole write() call) - depending on your JPA provider, a failed flush
+     * can mark that shared transaction rollback-only, in which case every
+     * subsequent saveAndFlush() call in the same loop (i.e. the rest of
+     * this chunk) will also fail, even for otherwise-valid entities. A
+     * smaller chunkSize limits how many unrelated rows can be caught in
+     * that blast radius. Fully isolating each fallback save in its own
+     * transaction (e.g. via REQUIRES_NEW propagation) would avoid this,
+     * but requires a proper Spring-managed bean rather than a static
+     * utility method - out of scope for this fix.
      */
     public static <E> void saveWithFallback(@NotNull List<E> entities, JpaRepository<E, ?> repository) {
         if (entities.isEmpty()) {
@@ -305,6 +320,19 @@ public class BatchUtility {
         try {
             // Try bulk save first
             repository.saveAll(entities);
+            // FIXED: repository.saveAll() maps to entityManager.persist()
+            // per entity, which by default defers actually executing the
+            // INSERT SQL until the next flush - normally at transaction
+            // commit time, which happens AFTER this method has already
+            // returned. That means a constraint violation (NOT NULL, FK,
+            // unique, etc.) would surface well outside this try/catch,
+            // deep inside Spring Batch's own chunk-commit machinery -
+            // never triggering the individual-save fallback below, and
+            // never getting recorded via addSkippedItem, no matter how
+            // real the failure was. Flushing here forces Hibernate to
+            // actually execute the batched INSERTs now, while we're still
+            // inside the try block that can catch and fall back on them.
+            repository.flush();
             log.info("✅ Successfully saved {} entities in bulk", entities.size());
         } catch (Exception e) {
             log.warn("⚠️ Bulk save failed, falling back to individual saves: {}", e.getMessage());
@@ -315,7 +343,14 @@ public class BatchUtility {
 
             for (E entity : entities) {
                 try {
-                    repository.save(entity);
+                    // FIXED: same reasoning as above - saveAndFlush (rather
+                    // than save) forces this specific entity's INSERT to
+                    // execute right now, so a constraint violation is
+                    // caught and attributed to THIS entity specifically,
+                    // instead of surfacing later at commit time where it's
+                    // impossible to tell which of the batch's entities
+                    // actually caused it.
+                    repository.saveAndFlush(entity);
                     successCount++;
                 } catch (Exception ex) {
                     failCount++;
