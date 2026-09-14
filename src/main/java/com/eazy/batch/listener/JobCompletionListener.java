@@ -48,7 +48,12 @@ public class JobCompletionListener implements JobExecutionListener {
         log.info("⏰ Start Time: {}", LocalDateTime.now());
         log.info("════════════════════════════════════════════════════════════");
 
-        BatchUtility.clearSkippedItems();
+        // FIXED: same context-lookup bug as afterJob() below - the no-arg
+        // overload depends on a step context that hasn't been registered
+        // yet this early (beforeJob fires before any step starts), so this
+        // could never actually clear anything. jobExecution.getId() is
+        // right here as a parameter; no context lookup needed.
+        BatchUtility.clearSkippedItems(jobExecution.getId());
     }
 
     @Override
@@ -103,7 +108,14 @@ public class JobCompletionListener implements JobExecutionListener {
                 .sum());
 
         // Log skipped items
-        List<BatchSkippedItem<?>> skipped = BatchUtility.getSkippedItems();
+        // FIXED: was calling the no-arg, step-context-based getSkippedItems(),
+        // which can never succeed here - afterJob() runs after the step's
+        // StepSynchronizationManager context has already been torn down, so
+        // this always logged the WARN "No job execution ID available" and
+        // silently returned an empty list, regardless of whether anything
+        // was actually skipped. Use the explicit jobExecutionId overload,
+        // which is already right here as a method parameter.
+        List<BatchSkippedItem<?>> skipped = BatchUtility.getSkippedItems(jobExecution.getId());
         if (!skipped.isEmpty()) {
             log.warn("⚠️ Job '{}' had {} skipped items:", jobName, skipped.size());
 
@@ -138,7 +150,12 @@ public class JobCompletionListener implements JobExecutionListener {
         sendFinalWebSocketMessage(jobExecution, jobName, status, duration, skipped);
 
         // Clear skipped items for this job
-        BatchUtility.clearSkippedItems();
+        // FIXED: same bug as above - the no-arg overload could never find
+        // this job's cache entries from here, so they were never actually
+        // cleared (a slow cache leak, one stale entry per completed job
+        // that had skips, until the Caffeine cache's own TTL/size eviction
+        // eventually caught up).
+        BatchUtility.clearSkippedItems(jobExecution.getId());
     }
 
     private void sendFinalWebSocketMessage(JobExecution jobExecution, String jobName, BatchStatus status,
