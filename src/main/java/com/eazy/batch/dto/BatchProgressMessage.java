@@ -37,6 +37,18 @@ public class BatchProgressMessage {
     /** Only set on COMPLETED/FAILED. */
     private Long durationMs;
 
+    /**
+     * Only set on FAILED: the root-cause message of whatever killed the job.
+     *
+     * <p>This exists because not every failure produces skipped rows. A
+     * job-level failure - a template/header mismatch, a missing file, a bad
+     * JPQL query - happens before or outside item processing, so skipCount
+     * stays 0 and no error report is generated. Without this field those
+     * failures reached the client as a bare {@code type = FAILED} with every
+     * other field zero/null, giving the user nothing to act on.</p>
+     */
+    private String failureMessage;
+
     /** Only set on COMPLETED/FAILED, and only if skipCount > 0. */
     private String errorFileName;
     /** Base64-encoded .xlsx bytes. Only set alongside errorFileName. */

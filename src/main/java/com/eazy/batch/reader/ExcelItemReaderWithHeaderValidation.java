@@ -4,7 +4,6 @@ import com.eazy.batch.annotation.ExcelDateFormat;
 import com.eazy.batch.exception.InvalidTemplateException;
 import com.poiji.annotation.ExcelCellName;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
 import org.apache.poi.ss.usermodel.*;
 import org.jetbrains.annotations.NotNull;
 import org.springframework.batch.infrastructure.item.ExecutionContext;
@@ -66,13 +65,18 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemStreamReader<
             this.datePattern = detectDatePattern(type);
             this.fieldMap = buildFieldMap(type);
 
-            // Validate headers immediately - fail fast for template issues.
-            // This opens and closes its own short-lived Workbook and does
-            // NOT set the `workbook`/`sheet` fields used for actual reading -
-            // those are only opened in open(), per the ItemStream contract.
-            validateHeaders(file, type);
-
-        } catch (IOException | InvalidFormatException e) {
+            // FIXED: header validation used to run HERE, in the constructor.
+            // Because the generated reader bean is @StepScope, it's behind a
+            // scoped proxy - so EVERY proxied call re-instantiates the target,
+            // meaning a template mismatch threw again on open() AND again on
+            // close(), producing a confusing cascade of suppressed
+            // BeanCreationExceptions ("Exception while closing step execution
+            // resources") on top of the real error. Validation now happens in
+            // open(), matching both the ItemStream contract (a reader should
+            // be constructible without side effects and only touch its
+            // resource once the step is executing) and CSVItemReader, which
+            // already validated in open().
+        } catch (IOException e) {
             throw new RuntimeException("Failed to read Excel file", e);
         }
     }
@@ -106,6 +110,11 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemStreamReader<
                 }
                 this.sheet = workbook.getSheetAt(sheetIndex);
             }
+
+            // FIXED: moved here from the constructor - see the note there.
+            // Runs against the already-open workbook/sheet rather than
+            // opening a second short-lived one.
+            validateHeaders(sheet);
 
             log.info("Excel reader initialized: {} rows to process", sheet.getLastRowNum());
 
@@ -340,70 +349,53 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemStreamReader<
         return map;
     }
 
-    private void validateHeaders(File file, Class<T> type) throws IOException, InvalidFormatException {
-        try (Workbook workbook = WorkbookFactory.create(file)) {
-            // FIXED: Check if workbook has sheets
-            if (workbook.getNumberOfSheets() == 0) {
-                throw new InvalidTemplateException("Excel file has no sheets");
-            }
+    /**
+     * Validates the sheet's header row against the DTO's @ExcelCellName
+     * fields. Takes the already-open sheet (resolved in open()) rather than
+     * reopening the file - the previous version created its own short-lived
+     * Workbook purely because it ran from the constructor, before open() had
+     * resolved anything.
+     */
+    private void validateHeaders(Sheet sheet) {
+        Row headerRow = sheet.getRow(0);
 
-            Sheet sheet;
-            if (sheetName != null && !sheetName.isEmpty()) {
-                sheet = workbook.getSheet(sheetName);
-                if (sheet == null) {
-                    throw new InvalidTemplateException(
-                            "Sheet '" + sheetName + "' not found in workbook"
-                    );
-                }
-            } else {
-                if (sheetIndex >= workbook.getNumberOfSheets()) {
-                    throw new InvalidTemplateException(
-                            "Sheet index " + sheetIndex + " out of bounds"
-                    );
-                }
-                sheet = workbook.getSheetAt(sheetIndex);
-            }
-
-            Row headerRow = sheet.getRow(0);
-
-            if (headerRow == null) {
-                throw new InvalidTemplateException(
-                        "Excel file does not contain a header row in sheet: " +
-                        (sheetName != null ? sheetName : "index " + sheetIndex)
-                );
-            }
-
-            List<String> excelHeaders = new ArrayList<>();
-            for (Cell cell : headerRow) {
-                String header = cell.getStringCellValue();
-                if (header != null && !header.trim().isEmpty()) {
-                    excelHeaders.add(header.trim());
-                }
-            }
-
-            List<String> expectedHeaders = getExpectedHeaders(type);
-            List<String> missingHeaders = expectedHeaders.stream()
-                    .filter(header -> !excelHeaders.contains(header))
-                    .toList();
-
-            List<String> extraHeaders = excelHeaders.stream()
-                    .filter(header -> !expectedHeaders.contains(header))
-                    .toList();
-
-            if (!missingHeaders.isEmpty() || !extraHeaders.isEmpty()) {
-                StringBuilder errorMsg = new StringBuilder("Invalid template. ");
-                if (!missingHeaders.isEmpty()) {
-                    errorMsg.append("Missing headers: ").append(missingHeaders).append(". ");
-                }
-                if (!extraHeaders.isEmpty()) {
-                    errorMsg.append("Extra headers: ").append(extraHeaders).append(".");
-                }
-                throw new InvalidTemplateException(errorMsg.toString().trim());
-            }
-
-            log.info("✅ Excel headers validated successfully for sheet: {}",
-                    sheetName != null ? sheetName : "index " + sheetIndex);
+        if (headerRow == null) {
+            throw new InvalidTemplateException(
+                    "Excel file does not contain a header row in sheet: " +
+                    (sheetName != null ? sheetName : "index " + sheetIndex)
+            );
         }
+
+        List<String> excelHeaders = new ArrayList<>();
+        for (Cell cell : headerRow) {
+            String header = cell.getStringCellValue();
+            if (header != null && !header.trim().isEmpty()) {
+                excelHeaders.add(header.trim());
+            }
+        }
+
+        List<String> expectedHeaders = getExpectedHeaders(type);
+        List<String> missingHeaders = expectedHeaders.stream()
+                .filter(header -> !excelHeaders.contains(header))
+                .toList();
+
+        List<String> extraHeaders = excelHeaders.stream()
+                .filter(header -> !expectedHeaders.contains(header))
+                .toList();
+
+        if (!missingHeaders.isEmpty() || !extraHeaders.isEmpty()) {
+            StringBuilder errorMsg = new StringBuilder("Invalid template. ");
+            if (!missingHeaders.isEmpty()) {
+                errorMsg.append("Missing headers: ").append(missingHeaders).append(". ");
+            }
+            if (!extraHeaders.isEmpty()) {
+                errorMsg.append("Extra headers: ").append(extraHeaders).append(".");
+            }
+            throw new InvalidTemplateException(errorMsg.toString().trim());
+        }
+
+        log.info("✅ Excel headers validated successfully for sheet: {}",
+                sheetName != null ? sheetName : "index " + sheetIndex);
     }
 
     private String detectDatePattern(@NotNull Class<T> type) {

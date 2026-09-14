@@ -173,6 +173,16 @@ public class JobCompletionListener implements JobExecutionListener {
                 .skipCount(skipCount)
                 .durationMs(duration.toMillis());
 
+        // NEW: surface WHY a job failed. Not every failure produces skipped
+        // rows - a template/header mismatch, missing file, or bad query fails
+        // the job before or outside item processing, leaving skipCount at 0
+        // and no error report to attach. Previously those reached the client
+        // as a bare FAILED with everything else zero/null, so the user had no
+        // idea what went wrong.
+        if (status == BatchStatus.FAILED) {
+            builder.failureMessage(rootCauseMessage(jobExecution));
+        }
+
         if (!skipped.isEmpty()) {
             byte[] excelBytes = ErrorReportExcelGenerator.generate(skipped);
             if (excelBytes != null) {
@@ -183,5 +193,34 @@ public class JobCompletionListener implements JobExecutionListener {
         }
 
         webSocketNotifier.send(jobExecution.getId(), builder.build());
+    }
+
+    /**
+     * Digs out the most specific message available for a failed job.
+     *
+     * <p>Spring wraps the real cause several layers deep - a template
+     * validation failure arrives as BeanCreationException -&gt;
+     * BeanInstantiationException -&gt; InvalidTemplateException, and only the
+     * innermost one carries the message a user can act on ("Missing headers:
+     * [Description]. Extra headers: [Descriptionaaa]."). Walking to the root
+     * cause gets that instead of the noisy wrapper text.</p>
+     */
+    private String rootCauseMessage(JobExecution jobExecution) {
+        List<Throwable> failures = jobExecution.getAllFailureExceptions();
+        if (failures == null || failures.isEmpty()) {
+            return "Job failed with no recorded exception";
+        }
+
+        Throwable root = failures.get(0);
+        // Guard against a self-referencing/cyclic cause chain.
+        int depth = 0;
+        while (root.getCause() != null && root.getCause() != root && depth++ < 20) {
+            root = root.getCause();
+        }
+
+        String message = root.getMessage();
+        return message != null && !message.isBlank()
+                ? message
+                : root.getClass().getSimpleName();
     }
 }
