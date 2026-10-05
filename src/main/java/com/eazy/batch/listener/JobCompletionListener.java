@@ -183,12 +183,27 @@ public class JobCompletionListener implements JobExecutionListener {
             builder.failureMessage(rootCauseMessage(jobExecution));
         }
 
-        if (!skipped.isEmpty()) {
-            byte[] excelBytes = ErrorReportExcelGenerator.generate(skipped);
-            if (excelBytes != null) {
-                builder.errorFileName(jobName + "_errors.xlsx")
-                        .errorFileBase64(Base64.getEncoder().encodeToString(excelBytes))
-                        .errorFileSizeBytes(excelBytes.length);
+        // A FAILED job must never reach the user without a downloadable
+        // explanation. If no row-level skips were recorded (header mismatch,
+        // missing file, infrastructure failure...), report the job-level
+        // failure itself as a single "JOB" row.
+        List<BatchSkippedItem<?>> reportItems = skipped;
+        if (reportItems.isEmpty() && status == BatchStatus.FAILED) {
+            reportItems = List.of(new BatchSkippedItem<>(null, "JOB", rootCauseMessage(jobExecution)));
+        }
+
+        if (!reportItems.isEmpty()) {
+            try {
+                byte[] excelBytes = ErrorReportExcelGenerator.generate(reportItems);
+                if (excelBytes != null) {
+                    builder.errorFileName(jobName + "_errors.xlsx")
+                            .errorFileBase64(Base64.getEncoder().encodeToString(excelBytes))
+                            .errorFileSizeBytes(excelBytes.length);
+                }
+            } catch (Exception e) {
+                // Report generation must never prevent the final status
+                // message from being sent.
+                log.error("Could not build error report for job {}: {}", jobExecution.getId(), e.getMessage(), e);
             }
         }
 

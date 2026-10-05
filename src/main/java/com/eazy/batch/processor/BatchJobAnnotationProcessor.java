@@ -51,6 +51,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
     private static final String DOUBLE_INDENT = INDENT + INDENT;
     private static final String TRIPLE_INDENT = INDENT + INDENT + INDENT;
     private static final String QUAD_INDENT = INDENT + INDENT + INDENT + INDENT;
+    private static final String QUINT_INDENT = QUAD_INDENT + INDENT;
 
     @Override
     public boolean process(Set<? extends TypeElement> annotations, @NotNull RoundEnvironment roundEnv) {
@@ -346,6 +347,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println();
             out.println("import " + dtoClassFqn + ";");
             out.println("import " + wrapperClassFqn + ";");
+            out.println("import com.eazy.batch.utility.BatchUtility;");
             out.println("import com.github.benmanes.caffeine.cache.Cache;");
             out.println("import com.github.benmanes.caffeine.cache.Caffeine;");
             out.println("import jakarta.validation.ConstraintViolation;");
@@ -382,30 +384,50 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(INDENT + "@Bean");
             out.println(INDENT + "public ItemProcessor<" + dtoClassName + ", " + wrapperClassName + "> " + stepName + "ItemProcessor() {");
             out.println(DOUBLE_INDENT + "return dto -> {");
-            out.println(TRIPLE_INDENT + "if (dto == null) { log.warn(\"Received null DTO\"); return null; }");
-            out.println(TRIPLE_INDENT + "dto = delegate.preProcess(dto);");
-            out.println(TRIPLE_INDENT + "if (!delegate.shouldProcess(dto)) { log.debug(\"Item filtered: {}\", delegate.getIdentifier(dto)); return null; }");
+            // NEW: capture the ORIGINAL instance Spring Batch handed us, before
+            // preProcess() possibly swaps it for a different object. Identity
+            // de-duplication in addSkippedItemOnce only works against the
+            // instance the framework reuses across its one-at-a-time chunk
+            // rescan, which is this one.
+            out.println(TRIPLE_INDENT + "final " + dtoClassName + " originalItem = dto;");
+            out.println(TRIPLE_INDENT + "try {");
+            out.println(QUAD_INDENT + "if (dto == null) { log.warn(\"Received null DTO\"); return null; }");
+            out.println(QUAD_INDENT + "dto = delegate.preProcess(dto);");
+            out.println(QUAD_INDENT + "if (!delegate.shouldProcess(dto)) { log.debug(\"Item filtered: {}\", delegate.getIdentifier(dto)); return null; }");
             if (cacheValidation) {
-                out.println(TRIPLE_INDENT + "final " + dtoClassName + " dtoForValidation = dto;");
-                out.println(TRIPLE_INDENT + "Set<ConstraintViolation<" + dtoClassName + ">> violations = validationCache.get(");
-                out.println(QUAD_INDENT + "dtoForValidation.toString(), key -> validator.validate(dtoForValidation));");
+                out.println(QUAD_INDENT + "final " + dtoClassName + " dtoForValidation = dto;");
+                out.println(QUAD_INDENT + "Set<ConstraintViolation<" + dtoClassName + ">> violations = validationCache.get(");
+                out.println(QUINT_INDENT + "dtoForValidation.toString(), key -> validator.validate(dtoForValidation));");
             } else {
-                out.println(TRIPLE_INDENT + "Set<ConstraintViolation<" + dtoClassName + ">> violations = validator.validate(dto);");
+                out.println(QUAD_INDENT + "Set<ConstraintViolation<" + dtoClassName + ">> violations = validator.validate(dto);");
             }
-            out.println(TRIPLE_INDENT + "if (!violations.isEmpty()) {");
-            out.println(QUAD_INDENT + "String errors = violations.stream().map(v -> v.getPropertyPath() + \": \" + v.getMessage()).collect(Collectors.joining(\", \"));");
-            out.println(QUAD_INDENT + "throw new RuntimeException(\"Validation failed: \" + errors);");
-            out.println(TRIPLE_INDENT + "}");
-            out.println(TRIPLE_INDENT + "List<String> customErrors = delegate.customValidate(dto);");
-            out.println(TRIPLE_INDENT + "if (customErrors != null && !customErrors.isEmpty()) {");
-            out.println(QUAD_INDENT + "throw new RuntimeException(\"Custom validation failed: \" + String.join(\", \", customErrors));");
-            out.println(TRIPLE_INDENT + "}");
+            out.println(QUAD_INDENT + "if (!violations.isEmpty()) {");
+            out.println(QUINT_INDENT + "String errors = violations.stream().map(v -> v.getPropertyPath() + \": \" + v.getMessage()).collect(Collectors.joining(\", \"));");
+            out.println(QUINT_INDENT + "throw new RuntimeException(\"Validation failed: \" + errors);");
+            out.println(QUAD_INDENT + "}");
+            out.println(QUAD_INDENT + "List<String> customErrors = delegate.customValidate(dto);");
+            out.println(QUAD_INDENT + "if (customErrors != null && !customErrors.isEmpty()) {");
+            out.println(QUINT_INDENT + "throw new RuntimeException(\"Custom validation failed: \" + String.join(\", \", customErrors));");
+            out.println(QUAD_INDENT + "}");
             if (dryRun) {
-                out.println(TRIPLE_INDENT + "log.debug(\"[DRY RUN] Would process: {}\", delegate.getIdentifier(dto)); return null;");
+                out.println(QUAD_INDENT + "log.debug(\"[DRY RUN] Would process: {}\", delegate.getIdentifier(dto)); return null;");
             } else {
-                out.println(TRIPLE_INDENT + "var result = delegate.process(dto);");
-                out.println(TRIPLE_INDENT + "return result != null ? delegate.postProcess(result) : null;");
+                out.println(QUAD_INDENT + "var result = delegate.process(dto);");
+                out.println(QUAD_INDENT + "return result != null ? delegate.postProcess(result) : null;");
             }
+            // NEW: record the skip HERE, at throw time, before rethrowing.
+            // Spring Batch only fires SkipListener callbacks when a chunk
+            // commits, so a step that dies mid-chunk (typically
+            // SkipLimitExceededException) rolled back without ever recording
+            // anything - leaving the final error report empty despite a
+            // non-zero skipCount. Rethrowing unchanged preserves all of
+            // Spring Batch's own skip/retry/fault-tolerance behavior; this
+            // only adds bookkeeping alongside it.
+            out.println(TRIPLE_INDENT + "} catch (Exception e) {");
+            out.println(QUAD_INDENT + "String reason = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();");
+            out.println(QUAD_INDENT + "BatchUtility.addSkippedItemOnce(originalItem, \"PROCESS\", reason);");
+            out.println(QUAD_INDENT + "throw e;");
+            out.println(TRIPLE_INDENT + "}");
             out.println(DOUBLE_INDENT + "};");
             out.println(INDENT + "}");
             out.println("}");
@@ -468,6 +490,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import org.springframework.lang.NonNull;");
             out.println("import org.springframework.stereotype.Component;");
             out.println("import static com.eazy.batch.utility.BatchUtility.addSkippedItem;");
+            out.println("import static com.eazy.batch.utility.BatchUtility.addSkippedItemOnce;");
             out.println();
             out.println("@Slf4j");
             out.println("@Component");
@@ -484,7 +507,13 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println();
             out.println(INDENT + "@Override");
             out.println(INDENT + "public void onSkipInProcess(@NonNull " + dtoClassName + " dto, @NonNull Throwable throwable) {");
-            out.println(DOUBLE_INDENT + "addSkippedItem(dto, \"PROCESS\", throwable.getMessage());");
+            // addSkippedItemOnce (not addSkippedItem): the generated
+            // ItemProcessor already recorded this item at throw time so the
+            // record survives an aborted chunk. When the chunk DOES commit,
+            // this callback fires for the same item instance - identity
+            // de-duplication collapses the two into one report row instead
+            // of double-counting every skip.
+            out.println(DOUBLE_INDENT + "addSkippedItemOnce(dto, \"PROCESS\", throwable.getMessage());");
             out.println(DOUBLE_INDENT + "log.error(\"[SKIP-PROCESS] {}: {}\", delegate.getIdentifier(dto), throwable.getMessage(), throwable);");
             out.println(INDENT + "}");
             out.println();

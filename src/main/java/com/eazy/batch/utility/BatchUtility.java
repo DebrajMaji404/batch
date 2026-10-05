@@ -127,6 +127,55 @@ public class BatchUtility {
     }
 
     /**
+     * Records a skipped item at THROW time, de-duplicated by object identity.
+     *
+     * <p>Spring Batch only fires SkipListener callbacks when a chunk
+     * successfully commits. If a step dies mid-chunk - most commonly on
+     * SkipLimitExceededException - that chunk rolls back and its listener
+     * callbacks never fire, so nothing was ever recorded here and the final
+     * error report comes out empty even though skipCount is non-zero. The
+     * generated ItemProcessor therefore calls this directly from its catch
+     * block, before rethrowing, so the record survives an aborted chunk.</p>
+     *
+     * <p>That creates a double-counting risk: when a chunk fails, Spring
+     * Batch re-processes its items ONE AT A TIME to isolate the culprit, so
+     * a failing item's process() runs more than once. De-duplication is by
+     * reference equality (==) rather than equals()/toString() on purpose -
+     * the rescan hands back the very same item instances from the chunk, so
+     * identity matches exactly the repeats we want to collapse, while two
+     * genuinely identical-but-distinct rows in the file remain distinct
+     * instances and are both reported. Items that are null (READ-phase
+     * failures, where nothing was parsed) are never identity-deduped, since
+     * every null would otherwise collapse into one.</p>
+     */
+    public static <T> void addSkippedItemOnce(T item, String phase, String reason) {
+        Long jobExecutionId = getJobExecutionId();
+        if (jobExecutionId == null) {
+            log.warn("No job execution ID available. Skipped item will not be tracked.");
+            return;
+        }
+
+        List<BatchSkippedItem<?>> items = skippedItemsByJobId.get(
+                jobExecutionId,
+                k -> new ArrayList<>()
+        );
+
+        synchronized (items) {
+            if (item != null) {
+                for (BatchSkippedItem<?> existing : items) {
+                    if (existing.getItem() == item && phase.equals(existing.getPhase())) {
+                        log.trace("Skip already recorded for this item instance in phase {} - not duplicating", phase);
+                        return;
+                    }
+                }
+            }
+            items.add(new BatchSkippedItem<>(item, phase, reason));
+        }
+
+        log.debug("Recorded skipped item for job {}: {} - {}", jobExecutionId, phase, reason);
+    }
+
+    /**
      * Add a skipped item with detailed error information
      *
      * @param item The skipped item (DTO)

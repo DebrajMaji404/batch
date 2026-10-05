@@ -151,6 +151,69 @@ class BatchUtilityTest {
     }
 
     // ─────────────────────────────────────────────────────────────────
+    // addSkippedItemOnce - identity de-duplication
+    // ─────────────────────────────────────────────────────────────────
+
+    /** Mutable holder so two "rows" can be equal by value but distinct instances. */
+    record Row(String name) {
+    }
+
+    @Test
+    void addSkippedItemOnce_collapsesRepeatsOfTheSameInstance() {
+        registerFakeStepContext(2001L);
+        Row row = new Row("bad");
+
+        // Simulates Spring Batch's one-at-a-time chunk rescan calling
+        // process() again for the same item instance after a chunk failure.
+        BatchUtility.addSkippedItemOnce(row, "PROCESS", "lookup failed");
+        BatchUtility.addSkippedItemOnce(row, "PROCESS", "lookup failed");
+        BatchUtility.addSkippedItemOnce(row, "PROCESS", "lookup failed");
+
+        List<BatchSkippedItem<?>> items = BatchUtility.getSkippedItems(2001L);
+        assertThat(items).hasSize(1);
+        assertThat(items.get(0).getItem()).isSameAs(row);
+    }
+
+    @Test
+    void addSkippedItemOnce_keepsTwoDistinctButEqualRows() {
+        registerFakeStepContext(2002L);
+        // Two genuinely separate rows in the file that happen to be identical
+        // by value. These are distinct instances, so BOTH must be reported -
+        // this is exactly why de-duplication is by reference, not equals().
+        Row first = new Row("dup");
+        Row second = new Row("dup");
+        assertThat(first).isEqualTo(second);
+        assertThat(first).isNotSameAs(second);
+
+        BatchUtility.addSkippedItemOnce(first, "PROCESS", "lookup failed");
+        BatchUtility.addSkippedItemOnce(second, "PROCESS", "lookup failed");
+
+        assertThat(BatchUtility.getSkippedItems(2002L)).hasSize(2);
+    }
+
+    @Test
+    void addSkippedItemOnce_doesNotCollapseNullItems() {
+        registerFakeStepContext(2003L);
+        // READ-phase failures carry no parsed item; every one would collapse
+        // into a single row if nulls were identity-deduped.
+        BatchUtility.addSkippedItemOnce(null, "READ", "malformed row 3");
+        BatchUtility.addSkippedItemOnce(null, "READ", "malformed row 7");
+
+        assertThat(BatchUtility.getSkippedItems(2003L)).hasSize(2);
+    }
+
+    @Test
+    void addSkippedItemOnce_sameInstanceInDifferentPhasesIsRecordedSeparately() {
+        registerFakeStepContext(2004L);
+        Row row = new Row("x");
+
+        BatchUtility.addSkippedItemOnce(row, "PROCESS", "validation failed");
+        BatchUtility.addSkippedItemOnce(row, "WRITE", "constraint violation");
+
+        assertThat(BatchUtility.getSkippedItems(2004L)).hasSize(2);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
     // saveWithFallback
     // ─────────────────────────────────────────────────────────────────
 

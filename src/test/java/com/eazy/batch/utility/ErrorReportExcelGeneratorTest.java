@@ -136,4 +136,19 @@ class ErrorReportExcelGeneratorTest {
             assertThat(sheet.getRow(2).getCell(0).getStringCellValue()).isEqualTo("raw-line-3");
         }
     }
+
+    @Test
+    void generate_jobLevelFailureProducesSingleExplanatoryRow() throws Exception {
+        List<BatchSkippedItem<?>> items = List.of(
+                new BatchSkippedItem<>(null, "JOB", "Missing headers: [Description]"));
+
+        byte[] bytes = ErrorReportExcelGenerator.generate(items);
+
+        try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(bytes))) {
+            Sheet sheet = workbook.getSheet("Errors");
+            assertThat(sheet.getRow(1).getCell(0).getStringCellValue()).isEqualTo("(not row-specific)");
+            assertThat(sheet.getRow(1).getCell(1).getStringCellValue()).isEqualTo("JOB");
+            assertThat(sheet.getRow(1).getCell(2).getStringCellValue()).isEqualTo("Missing headers: [Description]");
+        }
+    }
 }

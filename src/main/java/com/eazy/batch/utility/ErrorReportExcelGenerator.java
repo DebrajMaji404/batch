@@ -90,7 +90,8 @@ public final class ErrorReportExcelGenerator {
                 Object rawItem = item.getItem();
 
                 if (templateFields.isEmpty()) {
-                    row.createCell(0).setCellValue(rawItem != null ? rawItem.toString() : "(none - read failure)");
+                    row.createCell(0).setCellValue(rawItem != null ? rawItem.toString()
+                            : "READ".equals(item.getPhase()) ? "(none - read failure)" : "(not row-specific)");
                 } else {
                     for (int i = 0; i < templateFields.size(); i++) {
                         row.createCell(i).setCellValue(readFieldValue(rawItem, templateFields.get(i)));
