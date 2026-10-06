@@ -20,6 +20,9 @@ import org.springframework.batch.core.configuration.annotation.EnableBatchProces
 import org.springframework.batch.core.launch.support.TaskExecutorJobLauncher;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.SmartInitializingSingleton;
+import org.springframework.transaction.PlatformTransactionManager;
+import com.eazy.batch.utility.BatchTransactions;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -28,10 +31,12 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.batch.core.configuration.annotation.EnableJdbcJobRepository;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.context.annotation.Import;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.task.TaskExecutor;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.EnableScheduling;
@@ -67,37 +72,48 @@ public class BatchProcessorAutoConfiguration {
     }
 
     /**
-     * Smart batch table initializer - only creates tables if they don't exist
-     * FIXED: Better error handling and PostgreSQL-specific check
+     * Opt-in persistence of Spring Batch metadata ({@code eazy.batch.persist-job-metadata=true}).
+     * Spring Batch 6 defaults to a resourceless job repository that stores nothing; this
+     * switches to the JDBC repository on the application's DataSource and creates the tables.
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnProperty(prefix = "eazy.batch", name = "persist-job-metadata", havingValue = "true")
+    @EnableJdbcJobRepository(isolationLevelForCreate = Isolation.READ_COMMITTED)
+    static class JobMetadataPersistenceConfiguration {
+
+        /**
+         * Runs the bundled script, which is idempotent (CREATE ... IF NOT EXISTS), so a database
+         * that already has the tables from an older version still gets any missing sequence.
+         * PostgreSQL only; for other databases create the tables with Spring Batch's own scripts.
+         */
+        @Bean
+        public CommandLineRunner initializeBatchTables(DataSource dataSource) {
+            return args -> {
+                try {
+                    ResourceDatabasePopulator populator = new ResourceDatabasePopulator();
+                    populator.addScript(new ClassPathResource("schema-postgresql.sql"));
+                    populator.setContinueOnError(false);
+                    populator.execute(dataSource);
+                    log.info("✅ Spring Batch metadata tables are in place");
+                } catch (Exception e) {
+                    log.error("❌ Error during batch table initialization", e);
+                    throw new RuntimeException("Failed to initialize batch tables", e);
+                }
+            };
+        }
+    }
+
+    /**
+     * Hands the application's transaction manager to the row-isolation support
+     * ({@code @BatchJob(rowIsolation = true)} / {@code eazy.batch.row-isolation=true}).
      */
     @Bean
-    public CommandLineRunner initializeBatchTables(DataSource dataSource, JdbcTemplate jdbcTemplate) {
-        return args -> {
-            try {
-                // Check if batch tables already exist
-                String checkTableQuery =
-                        "SELECT COUNT(*) FROM information_schema.tables " +
-                                "WHERE table_schema = 'public' AND table_name = 'batch_job_instance'";
-
-                Integer count = jdbcTemplate.queryForObject(checkTableQuery, Integer.class);
-
-                if (count != null && count > 0) {
-                    log.info("✅ Spring Batch tables already exist. Skipping initialization.");
-                    return;
-                }
-
-                log.info("📦 Spring Batch tables not found. Creating tables...");
-
-                ResourceDatabasePopulator populator = new ResourceDatabasePopulator();
-                populator.addScript(new ClassPathResource("schema-postgresql.sql"));
-                populator.setContinueOnError(false);
-                populator.execute(dataSource);
-
-                log.info("✅ Spring Batch tables created successfully!");
-
-            } catch (Exception e) {
-                log.error("❌ Error during batch table initialization", e);
-                throw new RuntimeException("Failed to initialize batch tables", e);
+    public SmartInitializingSingleton batchTransactionsInitializer(ObjectProvider<PlatformTransactionManager> managers) {
+        return () -> {
+            PlatformTransactionManager manager = managers.getIfUnique(() -> managers.stream().findFirst().orElse(null));
+            BatchTransactions.configure(manager, properties.isRowIsolation());
+            if (properties.isRowIsolation()) {
+                log.info("✅ Row isolation enabled for all jobs");
             }
         };
     }
@@ -268,7 +284,8 @@ public class BatchProcessorAutoConfiguration {
         boolean enabled = properties.isWebsocketEnabled();
         log.info("✅ Batch WebSocket Notifier registered (enabled={}, topicPrefix={})",
                 enabled, properties.getWebsocketTopicPrefix());
-        return new BatchWebSocketNotifier(templateProvider.getIfAvailable(), enabled, properties.getWebsocketTopicPrefix());
+        return new BatchWebSocketNotifier(templateProvider.getIfAvailable(), enabled, properties.getWebsocketTopicPrefix(),
+                properties.isWebsocketUserDestinationEnabled() ? properties.getWebsocketUserQueue() : null);
     }
 
     /**

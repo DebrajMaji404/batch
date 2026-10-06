@@ -1,1 +1,2 @@
 com.eazy.batch.autoconfigure.BatchProcessorAutoConfiguration
+com.eazy.batch.autoconfigure.BatchWebAutoConfiguration

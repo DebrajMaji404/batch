@@ -16,6 +16,83 @@ Two annotations, two workflows:
 
 ---
 
+## Quick start: upload endpoint in 5 minutes
+
+Turn on the built-in endpoints and you do not need to write a controller, parse a multipart
+file or build job parameters yourself:
+
+```properties
+eazy.batch.api.enabled=true
+eazy.batch.upload.max-file-size-mb=20
+eazy.batch.upload.max-rows=50000
+eazy.batch.report.local-enabled=true      # or register your own BatchReportStorage bean (S3, ...)
+```
+
+| Endpoint | What it does |
+|---|---|
+| `POST /batch/{jobName}/upload` | multipart field `file`; every other form field becomes a job parameter (read it with `BatchContext`); `dryRun=true` validates without saving |
+| `GET /batch/{jobName}/template` | downloads an empty template built from your DTO (headers, example row, an "Instructions" sheet) |
+| `GET /batch/{jobExecutionId}/status` | latest progress message of a run (kept in memory for 24 h) |
+| `POST /batch/{jobExecutionId}/stop` | stops a running job after the current chunk |
+| `GET /batch/reports/{jobExecutionId}/{file}` | downloads a report kept by local report storage |
+
+The upload answers `202` with `{jobExecutionId, statusUrl}`. Follow the run over WebSocket on
+`/topic/batch-progress/{jobExecutionId}`, or - with a logged-in user - on the single
+destination `/user/queue/batch-progress` (no job id needed). The user is taken from the
+request's `Principal`. **These endpoints are not secured by the library; protect `/batch/**`
+like any other path of your application.**
+
+Add an example value to the template with `@ExcelSampleData("Asha")` on a DTO field.
+
+### `BatchContext` - who started this run?
+
+```java
+@Override
+public Wrapper process(Dto dto) {
+    BatchContext ctx = BatchContext.current();
+    String tenant = ctx.getString("tenantId");   // an extra upload form field
+    String user   = ctx.username();
+    ...
+}
+```
+
+### More `@BatchJob` options
+
+| Option | Effect |
+|---|---|
+| `onSkipLimit = SkipLimitMode.CONTINUE` | never abort because of bad rows - one run reports **every** bad row |
+| `skipOn = {...}` / `noSkipOn = {...}` | which exceptions skip a row, and which fail the job at once (note: with `skipOn` set, file-parse errors are only skipped if you list them) |
+| `uniqueKey = {"email"}` | a row repeating an earlier row's key in the same file fails with "Duplicate of row N"; field names are checked at compile time |
+| `rowIsolation = true` | each save attempt runs in its own transaction, so one bad row cannot roll back its neighbours (also `eazy.batch.row-isolation=true` for all jobs; needs a second DB connection while writing) |
+
+Per-request dry run: upload with `dryRun=true` - rows are validated (including `customValidate`
+and `uniqueKey`), `process()` and `save()` are not called, and the report shows what would fail.
+
+### Run history and monitoring
+
+With Spring Boot Actuator on the classpath and
+`management.endpoints.web.exposure.include=eazybatch`, `GET /actuator/eazybatch` lists the registered
+jobs, the effective configuration and the 20 most recent runs.
+
+Spring Batch 6 does not persist job metadata by default and this library does not need it.
+If you want `BATCH_*` tables (run history, restart), set `eazy.batch.persist-job-metadata=true`
+(PostgreSQL schema script is applied for you).
+
+### Testing your job
+
+```java
+var result = new BatchJobTester(jobLauncher, studentJob)
+        .username("tester").param("tenantId", "t1")
+        .runExcel(List.of("name", "age"), List.of(List.of("Asha", 21), List.of("", 5)));
+
+assertThat(result.message().getType()).isEqualTo(BatchProgressMessage.Type.COMPLETED);
+assertThat(result.failedRows()).hasSize(1);          // report rows: Status / Reason columns
+```
+
+A complete runnable example lives in [`samples/upload-demo`](samples/upload-demo).
+
+---
+
 ## Installation
 
 ### Step 1: Build the library

@@ -15,6 +15,11 @@ public final class ReportSpecRegistry {
         SPECS.put(spec.jobName(), spec);
     }
 
+    /** All registered batch jobs, by name. */
+    public static java.util.Collection<ReportSpec> all() {
+        return java.util.List.copyOf(SPECS.values());
+    }
+
     /** @return the spec, or {@code null} if the job was not generated from {@code @BatchJob} */
     public static ReportSpec find(String jobName) {
         return jobName == null ? null : SPECS.get(jobName);

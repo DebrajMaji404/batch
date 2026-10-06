@@ -109,6 +109,11 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
         String[] recipients = annotation.recipients();
         boolean hasNotification = notifyOnCompletion || notifyOnFailure;
         ReportType reportType = annotation.reportType();
+        continueOnSkipLimit = annotation.onSkipLimit() == com.eazy.batch.enums.SkipLimitMode.CONTINUE;
+        rowIsolation = annotation.rowIsolation();
+        uniqueKey = annotation.uniqueKey();
+        skipOnFqns = typeNames(annotation, true);
+        noSkipOnFqns = typeNames(annotation, false);
 
         // Extract class names
         String dtoClassFqn = getClassFqn(annotation, "dtoClass");
@@ -118,6 +123,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
 
         // Validate and generate
         validateConfiguration(jobName, stepName, dtoClassName, wrapperClassName, chunkSize, skipLimit, fileType, readerType, partitioned, incremental);
+        validateUniqueKey(dtoClassFqn, element);
         // FIXED: notifyOnCompletion/notifyOnFailure/recipients were declared
         // on @BatchJob since the beginning but never actually wired to
         // anything in this branch's processor - setting them had zero
@@ -241,7 +247,16 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
                 // would happily run with missing/misspelled job parameters.
                 out.println(DOUBLE_INDENT + "jobBuilder = jobBuilder.validator(new DefaultJobParametersValidator(");
                 out.println(TRIPLE_INDENT + "new String[]{" + joinQuoted(requiredParameters) + "},");
-                out.println(TRIPLE_INDENT + "new String[]{" + joinQuoted(optionalParameters) + "}));");
+                // The library's own job parameters (set by the built-in upload endpoint and read by
+                // BatchContext) must never be rejected as "unknown". DefaultJobParametersValidator
+                // only rejects unknown keys when the optional set is non-empty, so extend it only then.
+                String[] effectiveOptional = optionalParameters;
+                if (optionalParameters.length > 0) {
+                    java.util.LinkedHashSet<String> all = new java.util.LinkedHashSet<>(java.util.Arrays.asList(optionalParameters));
+                    all.addAll(java.util.List.of("filePath", "originalFileName", "timestamp", "username", "dryRun", "deleteFileAfterJob"));
+                    effectiveOptional = all.toArray(new String[0]);
+                }
+                out.println(TRIPLE_INDENT + "new String[]{" + joinQuoted(effectiveOptional) + "}));");
             }
             out.println(DOUBLE_INDENT + "return jobBuilder.build();");
             out.println(INDENT + "}");
@@ -258,7 +273,11 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(TRIPLE_INDENT + "BatchProgressChunkListener progressChunkListener) {");
             out.println(DOUBLE_INDENT + "log.info(\"Initializing batch step: {}\", \"" + stepName + "\");");
             out.println(DOUBLE_INDENT + "int effectiveChunkSize = " + (chunkSize == -1 ? "batchProcessorProperties.getDefaultChunkSize();" : chunkSize + ";"));
-            out.println(DOUBLE_INDENT + "int effectiveSkipLimit = " + (skipLimit == -1 ? "batchProcessorProperties.getDefaultSkipLimit();" : skipLimit + ";"));
+            if (continueOnSkipLimit) {
+                out.println(DOUBLE_INDENT + "int effectiveSkipLimit = Integer.MAX_VALUE; // onSkipLimit = CONTINUE");
+            } else {
+                out.println(DOUBLE_INDENT + "int effectiveSkipLimit = " + (skipLimit == -1 ? "batchProcessorProperties.getDefaultSkipLimit();" : skipLimit + ";"));
+            }
             if (parallelProcessing) {
                 // NEW: parallelProcessing()/threadPoolSize() were declared on
                 // @BatchJob but never wired to anything - the step always ran
@@ -291,7 +310,12 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(TRIPLE_INDENT + ".writer(writer)");
             out.println(TRIPLE_INDENT + ".faultTolerant()");
             out.println(TRIPLE_INDENT + ".skipLimit(effectiveSkipLimit)");
-            out.println(TRIPLE_INDENT + ".skip(Exception.class)");
+            if (skipOnFqns.isEmpty()) {
+                out.println(TRIPLE_INDENT + ".skip(Exception.class)");
+            } else {
+                for (String type : skipOnFqns) out.println(TRIPLE_INDENT + ".skip(" + type + ".class)");
+            }
+            for (String type : noSkipOnFqns) out.println(TRIPLE_INDENT + ".noSkip(" + type + ".class)");
             out.println(TRIPLE_INDENT + ".listener(skipListener)");
             // NEW: live progress push over WebSocket after every chunk.
             out.println(TRIPLE_INDENT + ".listener(progressChunkListener)");
@@ -416,6 +440,10 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(QUINT_INDENT + "String errors = violations.stream().map(v -> v.getPropertyPath() + \": \" + v.getMessage()).collect(Collectors.joining(\", \"));");
             out.println(QUINT_INDENT + "throw new RuntimeException(\"Validation failed: \" + errors);");
             out.println(QUAD_INDENT + "}");
+            if (uniqueKey.length > 0) {
+                out.println(QUAD_INDENT + "String duplicate = com.eazy.batch.utility.BatchUniqueKeys.check(originalItem, " + joinQuoted(uniqueKey) + ");");
+                out.println(QUAD_INDENT + "if (duplicate != null) { throw new RuntimeException(duplicate); }");
+            }
             out.println(QUAD_INDENT + "List<String> customErrors = delegate.customValidate(dto);");
             out.println(QUAD_INDENT + "if (customErrors != null && !customErrors.isEmpty()) {");
             out.println(QUINT_INDENT + "throw new RuntimeException(\"Custom validation failed: \" + String.join(\", \", customErrors));");
@@ -423,6 +451,8 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             if (dryRun) {
                 out.println(QUAD_INDENT + "log.debug(\"[DRY RUN] Would process: {}\", delegate.getIdentifier(dto)); BatchRowTracker.onProcessed(originalItem); return null;");
             } else {
+                // Per-request dry run (upload with dryRun=true): validate only, process nothing.
+                out.println(QUAD_INDENT + "if (com.eazy.batch.service.BatchContext.dryRunRequested()) { log.debug(\"[DRY RUN] Would process: {}\", delegate.getIdentifier(dto)); BatchRowTracker.onProcessed(originalItem); return null; }");
                 out.println(QUAD_INDENT + "var result = delegate.process(dto);");
                 // Tie the output to its upload row, and have the row counted as
                 // imported only if this chunk's transaction really commits.
@@ -484,7 +514,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             if (dryRun) {
                 out.println(TRIPLE_INDENT + "log.info(\"[DRY RUN] Would write {} items\", validItems.size());");
             } else {
-                out.println(TRIPLE_INDENT + "log.debug(\"Writing {} items\", validItems.size()); delegate.save(validItems);");
+                out.println(TRIPLE_INDENT + "log.debug(\"Writing {} items\", validItems.size()); " + (rowIsolation ? "com.eazy.batch.utility.BatchTransactions.run(true, () -> delegate.save(validItems));" : "com.eazy.batch.utility.BatchTransactions.run(false, () -> delegate.save(validItems));") + "");
                 out.println(TRIPLE_INDENT + "BatchRowTracker.onWritten(validItems);");
             }
             out.println(DOUBLE_INDENT + "};");
@@ -593,6 +623,49 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             }
             out.println(INDENT + "}");
             out.println("}");
+        }
+    }
+
+    // Per-job options of the @BatchJob being generated (set in the method that reads the annotation).
+    private boolean continueOnSkipLimit;
+    private boolean rowIsolation;
+    private String[] uniqueKey = new String[0];
+    private java.util.List<String> skipOnFqns = java.util.List.of();
+    private java.util.List<String> noSkipOnFqns = java.util.List.of();
+
+    /** Reads skipOn()/noSkipOn(): class arrays can only be read through MirroredTypesException. */
+    private java.util.List<String> typeNames(BatchJob annotation, boolean skipOn) {
+        java.util.List<String> names = new java.util.ArrayList<>();
+        try {
+            if (skipOn) annotation.skipOn(); else annotation.noSkipOn();
+        } catch (javax.lang.model.type.MirroredTypesException e) {
+            for (javax.lang.model.type.TypeMirror mirror : e.getTypeMirrors()) {
+                names.add(((TypeElement) ((DeclaredType) mirror).asElement()).getQualifiedName().toString());
+            }
+        }
+        return names;
+    }
+
+    /** Fails the build when a uniqueKey() name is not a field of the DTO (or its superclasses). */
+    private void validateUniqueKey(String dtoClassFqn, Element element) {
+        if (uniqueKey.length == 0) return;
+        TypeElement dto = processingEnv.getElementUtils().getTypeElement(dtoClassFqn);
+        for (String name : uniqueKey) {
+            boolean found = false;
+            for (TypeElement t = dto; t != null && !found; ) {
+                for (Element e : t.getEnclosedElements()) {
+                    if (e.getKind() == javax.lang.model.element.ElementKind.FIELD && e.getSimpleName().contentEquals(name)) {
+                        found = true;
+                        break;
+                    }
+                }
+                javax.lang.model.type.TypeMirror sup = t.getSuperclass();
+                t = sup instanceof DeclaredType d ? (TypeElement) d.asElement() : null;
+                if (t != null && t.getQualifiedName().contentEquals("java.lang.Object")) t = null;
+            }
+            if (!found) {
+                throw new IllegalArgumentException("@BatchJob uniqueKey '" + name + "' is not a field of " + dtoClassFqn);
+            }
         }
     }
 

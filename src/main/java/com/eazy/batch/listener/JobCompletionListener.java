@@ -4,6 +4,8 @@ import com.eazy.batch.dto.BatchProgressMessage;
 import com.eazy.batch.dto.BatchSkippedItem;
 import com.eazy.batch.report.BatchReportService;
 import com.eazy.batch.report.BatchRowTracker;
+import com.eazy.batch.service.BatchContext;
+import com.eazy.batch.service.BatchRunRegistry;
 import com.eazy.batch.service.BatchWebSocketNotifier;
 import com.eazy.batch.service.MetricsService;
 import com.eazy.batch.utility.BatchUtility;
@@ -63,6 +65,7 @@ public class JobCompletionListener implements JobExecutionListener {
         // right here as a parameter; no context lookup needed.
         BatchUtility.clearSkippedItems(jobExecution.getId());
         BatchRowTracker.clear(jobExecution.getId());
+        BatchRunRegistry.started(jobExecution);
     }
 
     @Override
@@ -156,7 +159,13 @@ public class JobCompletionListener implements JobExecutionListener {
         // NEW: final WebSocket push - completion/failure status plus, if any
         // rows were skipped, a base64-encoded Excel error report built from
         // the same `skipped` list just logged above.
-        sendFinalWebSocketMessage(jobExecution, jobName, status, duration, skipped);
+        try {
+            sendFinalWebSocketMessage(jobExecution, jobName, status, duration, skipped);
+        } finally {
+            BatchRunRegistry.finished(jobExecution.getId());
+            com.eazy.batch.utility.BatchUniqueKeys.clear(jobExecution.getId());
+            deleteUploadedFileIfRequested(jobExecution);
+        }
 
         // Clear skipped items for this job
         // FIXED: same bug as above - the no-arg overload could never find
@@ -166,6 +175,23 @@ public class JobCompletionListener implements JobExecutionListener {
         // eventually caught up).
         BatchUtility.clearSkippedItems(jobExecution.getId());
         BatchRowTracker.clear(jobExecution.getId());
+    }
+
+    /**
+     * Removes the uploaded file once the report (which re-reads it) has been built, when the
+     * run was started with {@code deleteFileAfterJob=true} (the built-in upload endpoint does
+     * this by default, see {@code eazy.batch.upload.delete-after-job}).
+     */
+    private void deleteUploadedFileIfRequested(JobExecution jobExecution) {
+        try {
+            if (!"true".equalsIgnoreCase(jobExecution.getJobParameters().getString(BatchContext.P_DELETE_FILE))) return;
+            String path = jobExecution.getJobParameters().getString(BatchContext.P_FILE_PATH);
+            if (path != null && java.nio.file.Files.deleteIfExists(java.nio.file.Path.of(path))) {
+                log.info("Deleted uploaded file {}", path);
+            }
+        } catch (Exception e) {
+            log.warn("Could not delete uploaded file for job execution {}: {}", jobExecution.getId(), e.getMessage());
+        }
     }
 
     private void sendFinalWebSocketMessage(JobExecution jobExecution, String jobName, BatchStatus status,
@@ -210,7 +236,8 @@ public class JobCompletionListener implements JobExecutionListener {
                     .reportNotImportedRows(report.notImportedRows());
         }
 
-        webSocketNotifier.send(jobExecution.getId(), builder.build());
+        webSocketNotifier.send(jobExecution.getId(),
+                jobExecution.getJobParameters().getString(BatchContext.P_USERNAME), builder.build());
     }
 
     /**

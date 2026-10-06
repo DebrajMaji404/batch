@@ -47,7 +47,13 @@ public class BatchWebSocketConfig implements WebSocketMessageBrokerConfigurer {
     public void configureMessageBroker(MessageBrokerRegistry registry) {
         // Simple in-memory broker - fine for progress broadcast, no external
         // message infrastructure (Kafka/RabbitMQ) required.
-        registry.enableSimpleBroker(topLevelSegmentOf(properties.getWebsocketTopicPrefix()));
+        String topic = topLevelSegmentOf(properties.getWebsocketTopicPrefix());
+        if (properties.isWebsocketUserDestinationEnabled()) {
+            String queue = topLevelSegmentOf(properties.getWebsocketUserQueue());
+            registry.enableSimpleBroker(topic.equals(queue) ? new String[]{topic} : new String[]{topic, queue});
+        } else {
+            registry.enableSimpleBroker(topic);
+        }
         registry.setApplicationDestinationPrefixes("/app");
     }
 

@@ -1,6 +1,7 @@
 package com.eazy.batch.listener;
 
 import com.eazy.batch.dto.BatchProgressMessage;
+import com.eazy.batch.service.BatchContext;
 import com.eazy.batch.service.BatchWebSocketNotifier;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -41,6 +42,7 @@ public class BatchProgressChunkListener implements ChunkListener {
                 .skipCount(stepExecution.getSkipCount())
                 .build();
 
-        webSocketNotifier.send(jobExecutionId, message);
+        webSocketNotifier.send(jobExecutionId,
+                stepExecution.getJobExecution().getJobParameters().getString(BatchContext.P_USERNAME), message);
     }
 }

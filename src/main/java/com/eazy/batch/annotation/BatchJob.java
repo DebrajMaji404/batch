@@ -3,6 +3,7 @@ package com.eazy.batch.annotation;
 import com.eazy.batch.enums.FileType;
 import com.eazy.batch.enums.ReaderType;
 import com.eazy.batch.enums.ReportType;
+import com.eazy.batch.enums.SkipLimitMode;
 
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
@@ -245,4 +246,34 @@ public @interface BatchJob {
      * base64 ({@code errorFileBase64}).
      */
     ReportType reportType() default ReportType.ERRORS;
+
+    /**
+     * What happens when {@code skipLimit} is exceeded. {@code CONTINUE} keeps going to the end
+     * of the file, so one run reports every bad row instead of stopping at the first few
+     * (the report still lists each failure with its reason). Default {@code FAIL}.
+     */
+    SkipLimitMode onSkipLimit() default SkipLimitMode.FAIL;
+
+    /**
+     * Exceptions that make a row skippable. Empty (default) = any {@code Exception}.
+     * Listing types here means anything else fails the job immediately.
+     */
+    Class<? extends Throwable>[] skipOn() default {};
+
+    /** Exceptions that must never be skipped - they fail the job at once (e.g. a lost database connection). */
+    Class<? extends Throwable>[] noSkipOn() default {};
+
+    /**
+     * DTO field names that together identify a row. A row repeating the key of an earlier row of
+     * the same file is rejected ("Duplicate of row N") instead of being imported twice.
+     * Names are checked against the DTO at compile time.
+     */
+    String[] uniqueKey() default {};
+
+    /**
+     * Save with one transaction per attempt (REQUIRES_NEW) so a bad row cannot roll back its
+     * good neighbours in the chunk. Also switchable for every job with
+     * {@code eazy.batch.row-isolation=true}. Needs a second database connection while writing.
+     */
+    boolean rowIsolation() default false;
 }

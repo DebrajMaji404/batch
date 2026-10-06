@@ -46,6 +46,13 @@ class AnnotationProcessorCodegenTest {
             PKG + "SampleParallelBatchJobConfigWriter",
             PKG + "SampleParallelBatchJobConfigSkipListener",
 
+            // Generated for SampleRulesBatchJobConfig (skip rules, unique key, row isolation)
+            PKG + "SampleRulesBatchJobConfigConfiguration",
+            PKG + "SampleRulesBatchJobConfigReader",
+            PKG + "SampleRulesBatchJobConfigProcessor",
+            PKG + "SampleRulesBatchJobConfigWriter",
+            PKG + "SampleRulesBatchJobConfigSkipListener",
+
             // Generated for SampleBatchExportJobConfig (@BatchExportJob)
             PKG + "SampleBatchExportJobConfigExportConfiguration",
             PKG + "SampleBatchExportJobConfigExportReader",

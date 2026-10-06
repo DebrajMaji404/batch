@@ -411,7 +411,8 @@ public class BatchUtility {
 
         try {
             // Try bulk save first
-            repository.saveAll(entities);
+            BatchTransactions.inNewTransaction(() -> {
+                repository.saveAll(entities);
             // FIXED: repository.saveAll() maps to entityManager.persist()
             // per entity, which by default defers actually executing the
             // INSERT SQL until the next flush - normally at transaction
@@ -424,7 +425,8 @@ public class BatchUtility {
             // real the failure was. Flushing here forces Hibernate to
             // actually execute the batched INSERTs now, while we're still
             // inside the try block that can catch and fall back on them.
-            repository.flush();
+                repository.flush();
+            });
             log.info("✅ Successfully saved {} entities in bulk", entities.size());
         } catch (Exception e) {
             log.warn("⚠️ Bulk save failed, falling back to individual saves: {}", e.getMessage());
@@ -442,7 +444,7 @@ public class BatchUtility {
                     // instead of surfacing later at commit time where it's
                     // impossible to tell which of the batch's entities
                     // actually caused it.
-                    repository.saveAndFlush(entity);
+                    BatchTransactions.inNewTransaction(() -> repository.saveAndFlush(entity));
                     successCount++;
                 } catch (Exception ex) {
                     failCount++;

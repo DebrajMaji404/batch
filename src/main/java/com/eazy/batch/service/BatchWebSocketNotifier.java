@@ -19,11 +19,19 @@ public class BatchWebSocketNotifier {
     private final SimpMessagingTemplate messagingTemplate;
     private final boolean enabled;
     private final String topicPrefix;
+    /** Destination for per-user pushes (e.g. /queue/batch-progress); null/blank disables them. */
+    private final String userQueue;
 
     public BatchWebSocketNotifier(SimpMessagingTemplate messagingTemplate, boolean enabled, String topicPrefix) {
+        this(messagingTemplate, enabled, topicPrefix, null);
+    }
+
+    public BatchWebSocketNotifier(SimpMessagingTemplate messagingTemplate, boolean enabled, String topicPrefix,
+                                  String userQueue) {
         this.messagingTemplate = messagingTemplate;
         this.enabled = enabled;
         this.topicPrefix = topicPrefix;
+        this.userQueue = userQueue;
     }
 
     private boolean isActive() {
@@ -31,10 +39,26 @@ public class BatchWebSocketNotifier {
     }
 
     public void send(Long jobExecutionId, BatchProgressMessage message) {
-        if (!isActive() || jobExecutionId == null) return;
+        send(jobExecutionId, null, message);
+    }
+
+    /**
+     * Sends to the per-job topic and, when {@code username} is known and a user queue is
+     * configured, also to that user's private queue ({@code /user/queue/batch-progress}),
+     * so a client can follow all of its own uploads with one subscription.
+     * The message is always recorded in {@link BatchRunRegistry} first, so the status
+     * endpoint works even with WebSocket disabled.
+     */
+    public void send(Long jobExecutionId, String username, BatchProgressMessage message) {
+        if (jobExecutionId == null) return;
+        BatchRunRegistry.record(message);
+        if (!isActive()) return;
         try {
             String destination = topicPrefix + "/" + jobExecutionId;
             messagingTemplate.convertAndSend(destination, message);
+            if (username != null && !username.isBlank() && userQueue != null && !userQueue.isBlank()) {
+                messagingTemplate.convertAndSendToUser(username, userQueue, message);
+            }
             log.debug("Sent {} WebSocket message to {}", message.getType(), destination);
         } catch (Exception e) {
             // Never let a broken WebSocket session fail the batch job itself.
