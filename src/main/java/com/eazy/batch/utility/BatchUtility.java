@@ -1,6 +1,7 @@
 package com.eazy.batch.utility;
 
 import com.eazy.batch.dto.BatchSkippedItem;
+import com.eazy.batch.report.BatchRowTracker;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
@@ -10,6 +11,7 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.springframework.batch.core.scope.context.StepSynchronizationManager;
 import org.springframework.batch.core.step.StepExecution;
+import org.springframework.batch.infrastructure.item.file.FlatFileParseException;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.time.Duration;
@@ -115,7 +117,7 @@ public class BatchUtility {
             return;
         }
 
-        BatchSkippedItem<T> skippedItem = new BatchSkippedItem<>(item, phase, reason);
+        BatchSkippedItem<T> skippedItem = new BatchSkippedItem<>(item, phase, reason, BatchRowTracker.rowOf(item));
 
         List<BatchSkippedItem<?>> items = skippedItemsByJobId.get(
                 jobExecutionId,
@@ -160,6 +162,7 @@ public class BatchUtility {
                 k -> new ArrayList<>()
         );
 
+        Integer rowNumber = BatchRowTracker.rowOf(item);
         synchronized (items) {
             if (item != null) {
                 for (BatchSkippedItem<?> existing : items) {
@@ -169,10 +172,50 @@ public class BatchUtility {
                     }
                 }
             }
-            items.add(new BatchSkippedItem<>(item, phase, reason));
+            items.add(new BatchSkippedItem<>(item, phase, reason, rowNumber));
         }
 
         log.debug("Recorded skipped item for job {}: {} - {}", jobExecutionId, phase, reason);
+    }
+
+    /**
+     * Records a READ-phase failure for a known row of the uploaded file,
+     * once. The file readers call this the moment a row fails to parse (so
+     * the failure survives an aborted chunk), and the generated SkipListener
+     * calls it again when the chunk commits - de-duplicating on the row
+     * number keeps it to one report row.
+     */
+    public static void addSkippedReadOnce(int rowNumber, String reason) {
+        Long jobExecutionId = getJobExecutionId();
+        if (jobExecutionId == null) {
+            log.warn("No job execution ID available. Skipped row {} will not be tracked.", rowNumber);
+            return;
+        }
+
+        List<BatchSkippedItem<?>> items = skippedItemsByJobId.get(jobExecutionId, k -> new ArrayList<>());
+        synchronized (items) {
+            for (BatchSkippedItem<?> existing : items) {
+                if ("READ".equals(existing.getPhase())
+                        && existing.getRowNumber() != null && existing.getRowNumber() == rowNumber) {
+                    return;
+                }
+            }
+            items.add(new BatchSkippedItem<>(null, "READ", reason, rowNumber));
+        }
+        log.debug("Recorded READ failure for job {} at row {}: {}", jobExecutionId, rowNumber, reason);
+    }
+
+    /**
+     * READ-phase skip callback: pulls the row number out of the reader's
+     * {@link FlatFileParseException} when there is one.
+     */
+    public static void addSkippedRead(Throwable throwable) {
+        String message = throwable.getMessage();
+        if (throwable instanceof FlatFileParseException parseException && parseException.getLineNumber() > 0) {
+            addSkippedReadOnce(parseException.getLineNumber(), message);
+        } else {
+            addSkippedItem(null, "READ", message);
+        }
     }
 
     /**

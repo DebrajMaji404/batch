@@ -2,6 +2,7 @@ package com.eazy.batch.testfixtures;
 
 import com.eazy.batch.annotation.BatchJob;
 import com.eazy.batch.config.SimpleBatchProcessor;
+import com.eazy.batch.enums.ReportType;
 
 import java.util.List;
 
@@ -24,6 +25,8 @@ import java.util.List;
         wrapperClass = SampleWrapper.class,
         requiredParameters = {"filePath"},
         optionalParameters = {"note"},
+        sheetName = "Data",
+        reportType = ReportType.ALL,
         notifyOnCompletion = true,
         recipients = {"ops@example.com"}
 )

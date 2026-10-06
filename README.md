@@ -562,10 +562,47 @@ handles delivery to whichever browser tabs are subscribed. This is on by default
 - After every chunk, a `PROGRESS` message is broadcast to
   `{websocketTopicPrefix}/{jobExecutionId}` (default topic prefix `/topic/batch-progress`,
   so e.g. `/topic/batch-progress/42`).
-- Exactly one `COMPLETED` or `FAILED` message is sent at the end. If any rows were skipped,
-  that message carries a base64-encoded `.xlsx` error report (columns: Item / Phase / Reason)
-  in `errorFileBase64` — decode it client-side and either save it or turn it into a download
-  link. No error report is attached if nothing was skipped.
+- Exactly one `COMPLETED` or `FAILED` message is sent at the end. It carries the job's Excel
+  report when there is one - see **Reports** below.
+
+### Reports (`@BatchJob(reportType = ...)`)
+
+The report mirrors the columns of the file the user uploaded, then adds two columns,
+`Status` and `Reason`. The user deletes those two, fixes the rows and uploads the file again.
+
+| `reportType`        | Contents                                                                                      |
+|---------------------|-----------------------------------------------------------------------------------------------|
+| `ERRORS` (default)  | Every row that was **not imported**. Nothing is produced if every row was imported.           |
+| `ALL`               | Every row of the file, each with its status.                                                  |
+
+`Status` is one of:
+
+- `SUCCESS` - imported (`ALL` only).
+- `FAILED` - the row itself was rejected; `Reason` says why (e.g. `[PROCESS] Paper Allocation not found for MJC-1`).
+- `NOT_IMPORTED` - the row is not necessarily at fault: its chunk was rolled back (e.g. the skip limit was hit
+  in the same chunk), or the job stopped before reaching it. `Reason` names the cause.
+
+Rows are only counted as `SUCCESS` once the chunk transaction that saved them has really committed.
+A job that fails before reading any row (template/header mismatch, missing file) still gets a one-row report
+holding the reason. If a job is restarted from a checkpoint, rows imported by the earlier run count as
+`SUCCESS` even if they failed there.
+
+**Where the file goes - register one `BatchReportStorage` bean:**
+
+```java
+@Bean
+BatchReportStorage batchReportStorage(S3Client s3) {
+    return file -> {                       // file: content (byte[]), fileName, contentType,
+        String key = "batch-reports/"      //       jobName, jobExecutionId, reportType
+                + file.jobExecutionId() + "/" + file.fileName();
+        s3.putObject(b -> b.bucket("my-bucket").key(key), RequestBody.fromBytes(file.content()));
+        return "https://my-bucket.s3.amazonaws.com/" + key;   // full URL, sent to the client
+    };
+}
+```
+
+With the bean, the final message carries `errorFileUrl` and no file bytes. Without it - or if the upload
+throws - the report is embedded as base64 in `errorFileBase64` instead, so the user always gets the file.
 
 **Message shape** (`BatchProgressMessage`, serialized as JSON):
 
@@ -579,13 +616,14 @@ handles delivery to whichever browser tabs are subscribed. This is on by default
   "skipCount": 20,
   "durationMs": null,
   "errorFileName": null,
+  "errorFileUrl": null,
   "errorFileBase64": null,
   "errorFileSizeBytes": null
 }
 ```
 
-On completion, `type` becomes `"COMPLETED"`/`"FAILED"`, `durationMs` is set, and — only if
-`skipCount > 0` — `errorFileName`/`errorFileBase64`/`errorFileSizeBytes` are populated.
+On completion, `type` becomes `"COMPLETED"`/`"FAILED"`, `durationMs` is set, and when there is a report
+`errorFileName`, `errorFileSizeBytes` and either `errorFileUrl` or `errorFileBase64` are populated.
 
 ### Server side — nothing to configure
 
@@ -636,7 +674,9 @@ const client = new Client({
         updateProgressBar(msg.writeCount, msg.readCount);
       } else {
         // COMPLETED or FAILED
-        if (msg.errorFileBase64) {
+        if (msg.errorFileUrl) {
+          window.open(msg.errorFileUrl);            // stored via your BatchReportStorage bean
+        } else if (msg.errorFileBase64) {
           downloadBase64File(msg.errorFileBase64, msg.errorFileName);
         }
         showFinalStatus(msg.type, msg);

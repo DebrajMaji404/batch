@@ -2,10 +2,11 @@ package com.eazy.batch.listener;
 
 import com.eazy.batch.dto.BatchProgressMessage;
 import com.eazy.batch.dto.BatchSkippedItem;
+import com.eazy.batch.report.BatchReportService;
+import com.eazy.batch.report.BatchRowTracker;
 import com.eazy.batch.service.BatchWebSocketNotifier;
 import com.eazy.batch.service.MetricsService;
 import com.eazy.batch.utility.BatchUtility;
-import com.eazy.batch.utility.ErrorReportExcelGenerator;
 import lombok.extern.slf4j.Slf4j;
 import org.jetbrains.annotations.NotNull;
 import org.springframework.batch.core.BatchStatus;
@@ -15,7 +16,6 @@ import org.springframework.batch.core.listener.JobExecutionListener;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
-import java.util.Base64;
 import java.util.List;
 
 /**
@@ -33,10 +33,18 @@ public class JobCompletionListener implements JobExecutionListener {
 
     private final MetricsService metricsService;
     private final BatchWebSocketNotifier webSocketNotifier;
+    private final BatchReportService reportService;
 
+    /** Reports are embedded as base64 (no {@code BatchReportStorage}). */
     public JobCompletionListener(MetricsService metricsService, BatchWebSocketNotifier webSocketNotifier) {
+        this(metricsService, webSocketNotifier, new BatchReportService(null));
+    }
+
+    public JobCompletionListener(MetricsService metricsService, BatchWebSocketNotifier webSocketNotifier,
+                                 BatchReportService reportService) {
         this.metricsService = metricsService;
         this.webSocketNotifier = webSocketNotifier;
+        this.reportService = reportService;
     }
 
     @Override
@@ -54,6 +62,7 @@ public class JobCompletionListener implements JobExecutionListener {
         // could never actually clear anything. jobExecution.getId() is
         // right here as a parameter; no context lookup needed.
         BatchUtility.clearSkippedItems(jobExecution.getId());
+        BatchRowTracker.clear(jobExecution.getId());
     }
 
     @Override
@@ -156,6 +165,7 @@ public class JobCompletionListener implements JobExecutionListener {
         // that had skips, until the Caffeine cache's own TTL/size eviction
         // eventually caught up).
         BatchUtility.clearSkippedItems(jobExecution.getId());
+        BatchRowTracker.clear(jobExecution.getId());
     }
 
     private void sendFinalWebSocketMessage(JobExecution jobExecution, String jobName, BatchStatus status,
@@ -180,34 +190,51 @@ public class JobCompletionListener implements JobExecutionListener {
         // as a bare FAILED with everything else zero/null, so the user had no
         // idea what went wrong.
         if (status == BatchStatus.FAILED) {
-            builder.failureMessage(rootCauseMessage(jobExecution));
+            builder.failureMessage(failureCause(jobExecution, status));
         }
 
-        // A FAILED job must never reach the user without a downloadable
-        // explanation. If no row-level skips were recorded (header mismatch,
-        // missing file, infrastructure failure...), report the job-level
-        // failure itself as a single "JOB" row.
-        List<BatchSkippedItem<?>> reportItems = skipped;
-        if (reportItems.isEmpty() && status == BatchStatus.FAILED) {
-            reportItems = List.of(new BatchSkippedItem<>(null, "JOB", rootCauseMessage(jobExecution)));
-        }
-
-        if (!reportItems.isEmpty()) {
-            try {
-                byte[] excelBytes = ErrorReportExcelGenerator.generate(reportItems);
-                if (excelBytes != null) {
-                    builder.errorFileName(jobName + "_errors.xlsx")
-                            .errorFileBase64(Base64.getEncoder().encodeToString(excelBytes))
-                            .errorFileSizeBytes(excelBytes.length);
-                }
-            } catch (Exception e) {
-                // Report generation must never prevent the final status
-                // message from being sent.
-                log.error("Could not build error report for job {}: {}", jobExecution.getId(), e.getMessage(), e);
-            }
+        // The report (ERRORS or ALL, per @BatchJob.reportType). A job that did
+        // not complete always gets one, even with no row-level skips (header
+        // mismatch, missing file, infrastructure failure...): it then holds a
+        // single row explaining why. Report problems never block this message.
+        String cause = status == BatchStatus.COMPLETED ? null : failureCause(jobExecution, status);
+        BatchReportService.PublishedReport report = reportService.publish(jobExecution, skipped, cause);
+        if (report != null) {
+            builder.errorFileName(report.fileName())
+                    .errorFileUrl(report.url())
+                    .errorFileBase64(report.base64())
+                    .errorFileSizeBytes(report.sizeBytes())
+                    .reportType(report.reportType())
+                    .reportSuccessRows(report.successRows())
+                    .reportFailedRows(report.failedRows())
+                    .reportNotImportedRows(report.notImportedRows());
         }
 
         webSocketNotifier.send(jobExecution.getId(), builder.build());
+    }
+
+    /**
+     * Why a job that did not complete stopped, in one line.
+     *
+     * <p>Usually the root-cause message. When the job died of
+     * {@code SkipLimitExceededException} that is not enough on its own - its
+     * root cause is merely the LAST row failure - so the skip-limit message
+     * leads: {@code Skip limit of '5' exceeded - last failure: ...}.</p>
+     */
+    private String failureCause(JobExecution jobExecution, BatchStatus status) {
+        List<Throwable> failures = jobExecution.getAllFailureExceptions();
+        if (failures == null || failures.isEmpty()) {
+            return "job ended with status " + status;
+        }
+
+        String root = rootCauseMessage(jobExecution);
+        int depth = 0;
+        for (Throwable t = failures.get(0); t != null && depth++ < 20; t = (t.getCause() == t ? null : t.getCause())) {
+            if ("SkipLimitExceededException".equals(t.getClass().getSimpleName()) && t.getMessage() != null) {
+                return t.getMessage().equals(root) ? root : t.getMessage() + " - last failure: " + root;
+            }
+        }
+        return root;
     }
 
     /**

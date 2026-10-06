@@ -1,5 +1,6 @@
 package com.eazy.batch.dto;
 
+import com.eazy.batch.enums.ReportType;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -11,9 +12,9 @@ import lombok.NoArgsConstructor;
  *
  * <p>{@code type = PROGRESS} messages are sent after every chunk while the job runs.
  * Exactly one {@code type = COMPLETED} or {@code type = FAILED} message is sent at the
- * end. If any rows were skipped, that final message carries a base64-encoded Excel
- * file (3 columns: item / phase / reason) in {@code errorFileBase64} — decode and save
- * it client-side, or turn it directly into a download link.</p>
+ * end carries the job's Excel report, if there is one: as a URL in {@code errorFileUrl}
+ * when a {@code BatchReportStorage} bean is registered, otherwise embedded as base64 in
+ * {@code errorFileBase64}.</p>
  */
 @Data
 @Builder
@@ -49,9 +50,35 @@ public class BatchProgressMessage {
      */
     private String failureMessage;
 
-    /** Only set on COMPLETED/FAILED, and only if skipCount > 0. */
+    /**
+     * Only set on COMPLETED/FAILED, and only when there is a report: the file
+     * name of the Excel report ({@code ..._errors.xlsx} for
+     * {@code reportType = ERRORS}, {@code ..._report.xlsx} for {@code ALL}).
+     */
     private String errorFileName;
-    /** Base64-encoded .xlsx bytes. Only set alongside errorFileName. */
+    /**
+     * Full URL of the report, as returned by your {@code BatchReportStorage}
+     * bean. Set instead of {@code errorFileBase64} whenever such a bean exists.
+     */
+    private String errorFileUrl;
+    /** Base64-encoded .xlsx bytes. Only set when no {@code BatchReportStorage} bean (or it failed). */
     private String errorFileBase64;
     private Integer errorFileSizeBytes;
+
+    /**
+     * What kind of file the report is, so the client can present it correctly:
+     * <ul>
+     *   <li>{@code ERRORS} - only the rows that were NOT imported (Status is FAILED or NOT_IMPORTED);</li>
+     *   <li>{@code ALL} - every row of the upload (Status is SUCCESS, FAILED or NOT_IMPORTED).</li>
+     * </ul>
+     * Set whenever {@code errorFileName} is. A job that died before any row could be
+     * reported on always yields an {@code ERRORS} file, even for {@code @BatchJob(reportType = ALL)}.
+     */
+    private ReportType reportType;
+    /** Rows in the report with Status SUCCESS (only ever &gt; 0 for {@code ALL}). */
+    private Integer reportSuccessRows;
+    /** Rows in the report with Status FAILED - rejected themselves; see their Reason. */
+    private Integer reportFailedRows;
+    /** Rows in the report with Status NOT_IMPORTED - lost to a rolled-back chunk or an early stop. */
+    private Integer reportNotImportedRows;
 }

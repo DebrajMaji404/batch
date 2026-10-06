@@ -2,6 +2,7 @@ package com.eazy.batch.reader;
 
 import com.eazy.batch.annotation.ExcelDateFormat;
 import com.eazy.batch.exception.InvalidTemplateException;
+import com.eazy.batch.report.BatchRowTracker;
 import com.opencsv.CSVReader;
 import com.opencsv.exceptions.CsvValidationException;
 import com.poiji.annotation.ExcelCellName;
@@ -54,6 +55,8 @@ public class CSVItemReader<T> implements ItemStreamReader<T> {
     private CSVReader csvReader;
     private String[] headers;
     private int currentRowIndex = 0;
+    /** Row number in the file (header = row 1) of the row most recently handed out by read(). */
+    private int lastRowNumber;
 
     public CSVItemReader(@NotNull Resource resource, Class<T> type) {
         this.resource = resource;
@@ -93,6 +96,9 @@ public class CSVItemReader<T> implements ItemStreamReader<T> {
                     }
                 }
                 this.currentRowIndex = (int) alreadyRead;
+                // Rows before the checkpoint were committed by the earlier run
+                // (header is row 1, so data row N is file row N + 1).
+                BatchRowTracker.onRestart(currentRowIndex + 1);
             }
         } catch (IOException | CsvValidationException e) {
             throw new ItemStreamException("Failed to open CSV file: " + e.getMessage(), e);
@@ -113,12 +119,22 @@ public class CSVItemReader<T> implements ItemStreamReader<T> {
     // Reading
     // ─────────────────────────────────────────────────────────────────
 
+    /**
+     * @return the row number in the CSV file (header = row 1) of the row most
+     *         recently returned - or failed on - by {@link #read()}
+     */
+    public int getLastRowNumber() {
+        return lastRowNumber;
+    }
+
     @Override
     public T read() {
         if (csvReader == null) {
             throw new IllegalStateException("CSV reader not open - open() must be called before read()");
         }
 
+        // The row this call is about to read, as the user sees it (header = row 1).
+        int sourceRow = currentRowIndex + 2;
         try {
             String[] row = csvReader.readNext();
 
@@ -128,6 +144,7 @@ public class CSVItemReader<T> implements ItemStreamReader<T> {
             }
 
             currentRowIndex++;
+            lastRowNumber = currentRowIndex + 1;
 
             // Skip empty rows
             if (isEmptyRow(row)) {
@@ -135,15 +152,20 @@ public class CSVItemReader<T> implements ItemStreamReader<T> {
                 return read();
             }
 
-            return parseRow(row, currentRowIndex);
+            T item = parseRow(row, lastRowNumber);
+            BatchRowTracker.onRead(item, lastRowNumber);
+            return item;
 
+        } catch (FlatFileParseException e) {
+            // Already wrapped and recorded by the (recursive) call that failed.
+            throw e;
         } catch (Exception e) {
-            throw new FlatFileParseException(
-                    "Error parsing CSV row " + currentRowIndex + ": " + e.getMessage(),
-                    e,
-                    "",
-                    currentRowIndex
-            );
+            lastRowNumber = sourceRow;
+            String message = "Error parsing CSV row " + sourceRow + ": " + e.getMessage();
+            // Record the failure NOW, not only when Spring Batch's SkipListener
+            // fires - that only happens if the chunk commits.
+            BatchRowTracker.onReadFailed(sourceRow, message);
+            throw new FlatFileParseException(message, e, "", sourceRow);
         }
     }
 

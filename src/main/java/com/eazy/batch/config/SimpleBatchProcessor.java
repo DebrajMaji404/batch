@@ -1,9 +1,10 @@
 package com.eazy.batch.config;
 
+import com.eazy.batch.report.BatchRowTracker;
 import org.springframework.data.jpa.repository.JpaRepository;
 
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
 import java.util.function.Function;
 
 import static com.eazy.batch.utility.BatchUtility.saveWithFallback;
@@ -148,13 +149,18 @@ public interface SimpleBatchProcessor<DTO, WRAPPER> {
             Function<WRAPPER, E> extractor,
             JpaRepository<E, ?> repository) {
 
-        List<E> entities = wrappers.stream()
-                .filter(Objects::nonNull)
-                .map(extractor)
-                .filter(Objects::nonNull)
-                .toList();
+        List<E> entities = new ArrayList<>();
+        List<WRAPPER> owners = new ArrayList<>();
+        for (WRAPPER wrapper : wrappers) {
+            if (wrapper == null) continue;
+            E entity = extractor.apply(wrapper);
+            if (entity != null) {
+                entities.add(entity);
+                owners.add(wrapper);
+            }
+        }
 
-        saveWithFallback(entities, repository);
+        saveOwned(entities, owners, repository);
     }
 
     /**
@@ -178,14 +184,19 @@ public interface SimpleBatchProcessor<DTO, WRAPPER> {
             Function<WRAPPER, List<E>> extractor,
             JpaRepository<E, ?> repository) {
 
-        List<E> entities = wrappers.stream()
-                .filter(Objects::nonNull)
-                .map(extractor)
-                .filter(Objects::nonNull)
-                .flatMap(List::stream)
-                .toList();
+        List<E> entities = new ArrayList<>();
+        List<WRAPPER> owners = new ArrayList<>();
+        for (WRAPPER wrapper : wrappers) {
+            if (wrapper == null) continue;
+            List<E> extracted = extractor.apply(wrapper);
+            if (extracted == null) continue;
+            for (E entity : extracted) {
+                entities.add(entity);
+                owners.add(wrapper);
+            }
+        }
 
-        saveWithFallback(entities, repository);
+        saveOwned(entities, owners, repository);
     }
 
     /**
@@ -211,13 +222,26 @@ public interface SimpleBatchProcessor<DTO, WRAPPER> {
             java.util.function.Predicate<E> predicate,
             JpaRepository<E, ?> repository) {
 
-        List<E> entities = wrappers.stream()
-                .filter(Objects::nonNull)
-                .map(extractor)
-                .filter(Objects::nonNull)
-                .filter(predicate)
-                .toList();
+        List<E> entities = new ArrayList<>();
+        List<WRAPPER> owners = new ArrayList<>();
+        for (WRAPPER wrapper : wrappers) {
+            if (wrapper == null) continue;
+            E entity = extractor.apply(wrapper);
+            if (entity != null && predicate.test(entity)) {
+                entities.add(entity);
+                owners.add(wrapper);
+            }
+        }
 
-        saveWithFallback(entities, repository);
+        saveOwned(entities, owners, repository);
+    }
+
+    /**
+     * Saves {@code entities} (with the usual individual-save fallback) while
+     * remembering which wrapper - and therefore which uploaded row - each
+     * entity belongs to, so a failed save is reported against the right row.
+     */
+    private <E> void saveOwned(List<E> entities, List<WRAPPER> owners, JpaRepository<E, ?> repository) {
+        BatchRowTracker.withOwners(entities, owners, () -> saveWithFallback(entities, repository));
     }
 }

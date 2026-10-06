@@ -2,6 +2,7 @@ package com.eazy.batch.reader;
 
 import com.eazy.batch.annotation.ExcelDateFormat;
 import com.eazy.batch.exception.InvalidTemplateException;
+import com.eazy.batch.report.BatchRowTracker;
 import com.poiji.annotation.ExcelCellName;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.ss.usermodel.*;
@@ -50,6 +51,8 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemStreamReader<
     private Workbook workbook;
     private Sheet sheet;
     private int currentRowIndex = 1; // Start at 1 (skip header at 0)
+    /** Excel row number (header = row 1) of the row most recently handed out by read(). */
+    private int lastRowNumber;
 
     public ExcelItemReaderWithHeaderValidation(@NotNull Resource resource, Class<T> type) {
         this(resource, type, 0, null);
@@ -122,6 +125,8 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemStreamReader<
             if (executionContext.containsKey(ROW_INDEX_KEY)) {
                 this.currentRowIndex = (int) executionContext.getLong(ROW_INDEX_KEY);
                 log.info("Restarting Excel reader at row {}", currentRowIndex);
+                // Rows before the checkpoint were committed by the earlier run.
+                BatchRowTracker.onRestart(currentRowIndex);
             }
         } catch (Exception e) {
             closeWorkbook();
@@ -143,12 +148,22 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemStreamReader<
     // Reading
     // ─────────────────────────────────────────────────────────────────
 
+    /**
+     * @return the row number in the Excel file (header = row 1) of the row
+     *         most recently returned - or failed on - by {@link #read()}
+     */
+    public int getLastRowNumber() {
+        return lastRowNumber;
+    }
+
     @Override
     public T read() {
         if (sheet == null) {
             throw new IllegalStateException("Excel reader not open - open() must be called before read()");
         }
 
+        // The row this call is about to look at, as the user sees it in Excel.
+        int sourceRow = currentRowIndex + 1;
         try {
             if (currentRowIndex > sheet.getLastRowNum()) {
                 return null;
@@ -157,6 +172,7 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemStreamReader<
             Row row = sheet.getRow(currentRowIndex);
             int rowNum = currentRowIndex;
             currentRowIndex++;
+            lastRowNumber = rowNum + 1;
 
             if (row == null || isEmptyRow(row)) {
                 // Skip empty rows
@@ -164,15 +180,20 @@ public class ExcelItemReaderWithHeaderValidation<T> implements ItemStreamReader<
                 return read();
             }
 
-            return parseRow(row, rowNum);
+            T item = parseRow(row, rowNum);
+            BatchRowTracker.onRead(item, rowNum + 1);
+            return item;
+        } catch (FlatFileParseException e) {
+            // Already wrapped and recorded by the (recursive) call that failed.
+            throw e;
         } catch (Exception e) {
+            lastRowNumber = sourceRow;
+            String message = "Error parsing row " + sourceRow + ": " + e.getMessage();
+            // Record the failure NOW, not only when Spring Batch's SkipListener
+            // fires - that only happens if the chunk commits.
+            BatchRowTracker.onReadFailed(sourceRow, message);
             // Wrap in FlatFileParseException so Spring Batch can handle it
-            throw new FlatFileParseException(
-                    "Error parsing row " + currentRowIndex + ": " + e.getMessage(),
-                    e,
-                    "",
-                    currentRowIndex
-            );
+            throw new FlatFileParseException(message, e, "", sourceRow);
         }
     }
 

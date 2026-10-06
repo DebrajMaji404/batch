@@ -3,6 +3,7 @@ package com.eazy.batch.processor;
 import com.eazy.batch.annotation.BatchJob;
 import com.eazy.batch.enums.FileType;
 import com.eazy.batch.enums.ReaderType;
+import com.eazy.batch.enums.ReportType;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -107,6 +108,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
         boolean notifyOnFailure = annotation.notifyOnFailure();
         String[] recipients = annotation.recipients();
         boolean hasNotification = notifyOnCompletion || notifyOnFailure;
+        ReportType reportType = annotation.reportType();
 
         // Extract class names
         String dtoClassFqn = getClassFqn(annotation, "dtoClass");
@@ -124,7 +126,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             throw new IllegalArgumentException(
                     "notifyOnCompletion/notifyOnFailure is true but recipients() is empty on @BatchJob for " + className);
         }
-        generateJobConfiguration(packageName, className, jobName, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn, chunkSize, skipLimit, enableRetry, retryLimit, retryableExceptions, requiredParameters, optionalParameters, parallelProcessing, threadPoolSize, hasNotification);
+        generateJobConfiguration(packageName, className, jobName, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn, chunkSize, skipLimit, enableRetry, retryLimit, retryableExceptions, requiredParameters, optionalParameters, parallelProcessing, threadPoolSize, hasNotification, fileType, sheetName, sheetIndex, reportType);
         generateReader(packageName, className, stepName, dtoClassName, dtoClassFqn, fileType, sheetName, sheetIndex);
         generateProcessor(packageName, className, stepName, dtoClassName, wrapperClassName, dtoClassFqn, wrapperClassFqn, dryRun, cacheValidation);
         generateWriter(packageName, className, stepName, wrapperClassName, wrapperClassFqn, dryRun);
@@ -168,7 +170,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
         }
     }
 
-    private void generateJobConfiguration(String packageName, String className, String jobName, String stepName, String dtoClassName, String wrapperClassName, String dtoClassFqn, String wrapperClassFqn, int chunkSize, int skipLimit, boolean enableRetry, int retryLimit, String[] retryableExceptions, String[] requiredParameters, String[] optionalParameters, boolean parallelProcessing, int threadPoolSize, boolean hasNotification) throws IOException {
+    private void generateJobConfiguration(String packageName, String className, String jobName, String stepName, String dtoClassName, String wrapperClassName, String dtoClassFqn, String wrapperClassFqn, int chunkSize, int skipLimit, boolean enableRetry, int retryLimit, String[] retryableExceptions, String[] requiredParameters, String[] optionalParameters, boolean parallelProcessing, int threadPoolSize, boolean hasNotification, FileType fileType, String sheetName, int sheetIndex, ReportType reportType) throws IOException {
         String generatedClassName = className + "Configuration";
         JavaFileObject file = processingEnv.getFiler().createSourceFile(packageName + "." + generatedClassName);
 
@@ -178,6 +180,10 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import " + dtoClassFqn + ";");
             out.println("import " + wrapperClassFqn + ";");
             out.println("import com.eazy.batch.autoconfigure.BatchProcessorProperties;");
+            out.println("import com.eazy.batch.enums.FileType;");
+            out.println("import com.eazy.batch.enums.ReportType;");
+            out.println("import com.eazy.batch.report.ReportSpec;");
+            out.println("import com.eazy.batch.report.ReportSpecRegistry;");
             out.println("import lombok.RequiredArgsConstructor;");
             out.println("import lombok.extern.slf4j.Slf4j;");
             out.println("import org.springframework.batch.core.job.Job;");
@@ -219,6 +225,10 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(INDENT + "@Bean");
             out.println(INDENT + "public Job " + jobName + "(Step " + stepName + (hasNotification ? ", " + className + "NotificationListener notificationListener" : "") + ") {");
             out.println(DOUBLE_INDENT + "log.info(\"Initializing batch job: {}\", \"" + jobName + "\");");
+            // Tells the completion listener how to re-read this job's input file
+            // so it can build the ERRORS / ALL report with every row accounted for.
+            out.println(DOUBLE_INDENT + "ReportSpecRegistry.register(new ReportSpec(\"" + jobName + "\", " + dtoClassName + ".class, FileType." + fileType.name() + ", "
+                    + sheetIndex + ", " + (sheetName.isEmpty() ? "null" : "\"" + sheetName.replace("\"", "\\\"") + "\"") + ", ReportType." + reportType.name() + "));");
             out.println(DOUBLE_INDENT + "var jobBuilder = new JobBuilder(\"" + jobName + "\", jobRepository)");
             out.println(QUAD_INDENT + ".listener(jobCompletionListener)");
             if (hasNotification) {
@@ -348,6 +358,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import " + dtoClassFqn + ";");
             out.println("import " + wrapperClassFqn + ";");
             out.println("import com.eazy.batch.utility.BatchUtility;");
+            out.println("import com.eazy.batch.report.BatchRowTracker;");
             out.println("import com.github.benmanes.caffeine.cache.Cache;");
             out.println("import com.github.benmanes.caffeine.cache.Caffeine;");
             out.println("import jakarta.validation.ConstraintViolation;");
@@ -393,7 +404,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(TRIPLE_INDENT + "try {");
             out.println(QUAD_INDENT + "if (dto == null) { log.warn(\"Received null DTO\"); return null; }");
             out.println(QUAD_INDENT + "dto = delegate.preProcess(dto);");
-            out.println(QUAD_INDENT + "if (!delegate.shouldProcess(dto)) { log.debug(\"Item filtered: {}\", delegate.getIdentifier(dto)); return null; }");
+            out.println(QUAD_INDENT + "if (!delegate.shouldProcess(dto)) { log.debug(\"Item filtered: {}\", delegate.getIdentifier(dto)); BatchRowTracker.onProcessed(originalItem); return null; }");
             if (cacheValidation) {
                 out.println(QUAD_INDENT + "final " + dtoClassName + " dtoForValidation = dto;");
                 out.println(QUAD_INDENT + "Set<ConstraintViolation<" + dtoClassName + ">> violations = validationCache.get(");
@@ -410,10 +421,15 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(QUINT_INDENT + "throw new RuntimeException(\"Custom validation failed: \" + String.join(\", \", customErrors));");
             out.println(QUAD_INDENT + "}");
             if (dryRun) {
-                out.println(QUAD_INDENT + "log.debug(\"[DRY RUN] Would process: {}\", delegate.getIdentifier(dto)); return null;");
+                out.println(QUAD_INDENT + "log.debug(\"[DRY RUN] Would process: {}\", delegate.getIdentifier(dto)); BatchRowTracker.onProcessed(originalItem); return null;");
             } else {
                 out.println(QUAD_INDENT + "var result = delegate.process(dto);");
-                out.println(QUAD_INDENT + "return result != null ? delegate.postProcess(result) : null;");
+                // Tie the output to its upload row, and have the row counted as
+                // imported only if this chunk's transaction really commits.
+                out.println(QUAD_INDENT + "var processed = result != null ? delegate.postProcess(result) : null;");
+                out.println(QUAD_INDENT + "BatchRowTracker.linkOutput(originalItem, processed);");
+                out.println(QUAD_INDENT + "BatchRowTracker.onProcessed(originalItem);");
+                out.println(QUAD_INDENT + "return processed;");
             }
             // NEW: record the skip HERE, at throw time, before rethrowing.
             // Spring Batch only fires SkipListener callbacks when a chunk
@@ -442,6 +458,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("package " + packageName + ";");
             out.println();
             out.println("import " + wrapperClassFqn + ";");
+            out.println("import com.eazy.batch.report.BatchRowTracker;");
             out.println("import lombok.RequiredArgsConstructor;");
             out.println("import lombok.extern.slf4j.Slf4j;");
             out.println("import org.springframework.batch.infrastructure.item.Chunk;");
@@ -468,6 +485,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
                 out.println(TRIPLE_INDENT + "log.info(\"[DRY RUN] Would write {} items\", validItems.size());");
             } else {
                 out.println(TRIPLE_INDENT + "log.debug(\"Writing {} items\", validItems.size()); delegate.save(validItems);");
+                out.println(TRIPLE_INDENT + "BatchRowTracker.onWritten(validItems);");
             }
             out.println(DOUBLE_INDENT + "};");
             out.println(INDENT + "}");
@@ -490,6 +508,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println("import org.springframework.lang.NonNull;");
             out.println("import org.springframework.stereotype.Component;");
             out.println("import static com.eazy.batch.utility.BatchUtility.addSkippedItem;");
+            out.println("import static com.eazy.batch.utility.BatchUtility.addSkippedRead;");
             out.println("import static com.eazy.batch.utility.BatchUtility.addSkippedItemOnce;");
             out.println();
             out.println("@Slf4j");
@@ -501,7 +520,7 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println();
             out.println(INDENT + "@Override");
             out.println(INDENT + "public void onSkipInRead(@NonNull Throwable throwable) {");
-            out.println(DOUBLE_INDENT + "addSkippedItem(null, \"READ\", throwable.getMessage());");
+            out.println(DOUBLE_INDENT + "addSkippedRead(throwable);");
             out.println(DOUBLE_INDENT + "log.error(\"[SKIP-READ] {}\", throwable.getMessage(), throwable);");
             out.println(INDENT + "}");
             out.println();

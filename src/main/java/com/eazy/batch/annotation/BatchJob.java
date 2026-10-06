@@ -2,6 +2,7 @@ package com.eazy.batch.annotation;
 
 import com.eazy.batch.enums.FileType;
 import com.eazy.batch.enums.ReaderType;
+import com.eazy.batch.enums.ReportType;
 
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
@@ -222,4 +223,26 @@ public @interface BatchJob {
      * toString()), since that would make the cache key unreliable.
      */
     boolean cacheValidation() default true;
+
+    /**
+     * Which Excel report the job produces when it ends. Both reports mirror
+     * the columns of the uploaded template plus {@code Status} and
+     * {@code Reason} columns - delete those two, fix the rows, re-upload.
+     *
+     * <ul>
+     *   <li>{@link ReportType#ERRORS} (default): every row that did NOT get
+     *       imported - rows that failed (with the reason) and rows lost to a
+     *       rolled-back chunk or to the job stopping early
+     *       ({@code NOT_IMPORTED}, with the reason). Nothing is produced when
+     *       every row was imported.</li>
+     *   <li>{@link ReportType#ALL}: every row of the file with its
+     *       {@code SUCCESS} / {@code FAILED} / {@code NOT_IMPORTED} status.</li>
+     * </ul>
+     *
+     * Where the report goes: register a
+     * {@code com.eazy.batch.report.BatchReportStorage} bean to upload it and
+     * receive its URL ({@code errorFileUrl}); without one it is embedded as
+     * base64 ({@code errorFileBase64}).
+     */
+    ReportType reportType() default ReportType.ERRORS;
 }

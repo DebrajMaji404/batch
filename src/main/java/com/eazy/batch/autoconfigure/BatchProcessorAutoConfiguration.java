@@ -2,6 +2,8 @@ package com.eazy.batch.autoconfigure;
 
 import com.eazy.batch.listener.BatchProgressChunkListener;
 import com.eazy.batch.listener.JobCompletionListener;
+import com.eazy.batch.report.BatchReportService;
+import com.eazy.batch.report.BatchReportStorage;
 import com.eazy.batch.service.BatchCleanupService;
 import com.eazy.batch.service.BatchWebSocketNotifier;
 import com.eazy.batch.service.EmailNotificationService;
@@ -148,9 +150,24 @@ public class BatchProcessorAutoConfiguration {
      */
     @Bean
     @ConditionalOnMissingBean(JobCompletionListener.class)
-    public JobCompletionListener jobCompletionListener(MetricsService metricsService, BatchWebSocketNotifier webSocketNotifier) {
+    public JobCompletionListener jobCompletionListener(MetricsService metricsService, BatchWebSocketNotifier webSocketNotifier,
+                                                       BatchReportService reportService) {
         log.info("✅ Default JobCompletionListener registered");
-        return new JobCompletionListener(metricsService, webSocketNotifier);
+        return new JobCompletionListener(metricsService, webSocketNotifier, reportService);
+    }
+
+    /**
+     * Builds the end-of-job Excel report. If the application registers a
+     * {@link BatchReportStorage} bean the report is uploaded through it and
+     * only its URL is sent to the client; otherwise it is embedded as base64.
+     */
+    @Bean
+    @ConditionalOnMissingBean(BatchReportService.class)
+    public BatchReportService batchReportService(ObjectProvider<BatchReportStorage> storageProvider) {
+        BatchReportStorage storage = storageProvider.getIfUnique();
+        log.info("✅ Batch report service registered (storage={})",
+                storage != null ? storage.getClass().getSimpleName() : "none - reports are embedded as base64");
+        return new BatchReportService(storage);
     }
 
     /**

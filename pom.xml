@@ -136,18 +136,6 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- MetaDataInstanceFactory etc. - Spring Batch's own official test
-             utilities for building JobExecution/StepExecution test fixtures
-             without hand-rolling domain-object constructors (which are
-             version-sensitive - e.g. entity IDs changed from Long to
-             primitive long between Spring Batch 5 and 6). Version comes from
-             the spring-boot-dependencies BOM imported above. -->
-        <dependency>
-            <groupId>org.springframework.batch</groupId>
-            <artifactId>spring-batch-test</artifactId>
-            <scope>test</scope>
-        </dependency>
-
     </dependencies>
 
     <build>
