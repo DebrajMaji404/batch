@@ -3,6 +3,7 @@ package com.eazy.batch.report;
 import com.eazy.batch.enums.FileType;
 import com.eazy.batch.reader.CSVItemReader;
 import com.eazy.batch.reader.ExcelItemReaderWithHeaderValidation;
+import com.eazy.batch.reader.StructuredFileItemReader;
 import org.springframework.batch.infrastructure.item.ExecutionContext;
 import org.springframework.batch.infrastructure.item.ItemStreamReader;
 import org.springframework.batch.infrastructure.item.file.FlatFileParseException;
@@ -34,6 +35,10 @@ final class SourceRows implements AutoCloseable {
             CSVItemReader<Object> csv = new CSVItemReader<>(resource, dtoClass);
             this.reader = csv;
             this.lastRow = csv::getLastRowNumber;
+        } else if (spec.fileType() == FileType.JSON || spec.fileType() == FileType.XML) {
+            StructuredFileItemReader<Object> structured = new StructuredFileItemReader<>(resource, dtoClass, spec.fileType());
+            this.reader = structured;
+            this.lastRow = structured::getLastRowNumber;
         } else {
             ExcelItemReaderWithHeaderValidation<Object> excel = new ExcelItemReaderWithHeaderValidation<>(
                     resource, dtoClass, spec.sheetIndex(), spec.sheetName());

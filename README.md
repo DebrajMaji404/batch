@@ -56,6 +56,32 @@ public Wrapper process(Dto dto) {
 }
 ```
 
+### File types: Excel, CSV, JSON, XML
+
+`@BatchJob(fileType = ...)` accepts `EXCEL` (default), `CSV`, `JSON` and `XML`. The same DTO, validation,
+skip rules and report work for all four; `GET /batch/{jobName}/template` returns an empty template in the
+job's own format, built from its DTO, and `GET /batch/jobs` lists every job with its file type and URLs.
+
+| fileType | File looks like | Row number in messages and reports |
+|---|---|---|
+| `EXCEL`, `CSV` | header row + one row per record | file row (header = row 1) |
+| `JSON` | array of flat objects, or `{"anything": [ ... ]}` | the Nth record (first record = row 1) |
+| `XML` | a root element whose children are the records; each record has one child element (or attribute) per field | the Nth record |
+
+```json
+[ { "Student Name": "Asha", "Age": 21, "Joined": "31/01/2025" } ]
+```
+```xml
+<rows><row><Student_Name>Asha</Student_Name><Age>21</Age><Joined>31/01/2025</Joined></row></rows>
+```
+
+Field names are matched to the DTO's `@ExcelCellName` headers (or the Java field names) ignoring case, spaces and
+punctuation, so `"Student Name"`, `student_name` and `studentName` are the same field. A name that matches nothing
+rejects that record instead of importing it empty. Records must be flat - a nested object only fails its own record.
+A file that is not well-formed fails at the first unreadable record; everything after it is reported `NOT_IMPORTED`.
+XML uploads cannot load external entities or DTDs. The error/status report is always an Excel file, whatever the
+upload format.
+
 ### More `@BatchJob` options
 
 | Option | Effect |

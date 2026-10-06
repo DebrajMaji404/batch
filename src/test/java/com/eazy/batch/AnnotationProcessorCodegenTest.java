@@ -53,6 +53,18 @@ class AnnotationProcessorCodegenTest {
             PKG + "SampleRulesBatchJobConfigWriter",
             PKG + "SampleRulesBatchJobConfigSkipListener",
 
+            // Generated for the JSON and XML fixtures
+            PKG + "SampleJsonBatchJobConfigConfiguration",
+            PKG + "SampleJsonBatchJobConfigReader",
+            PKG + "SampleJsonBatchJobConfigProcessor",
+            PKG + "SampleJsonBatchJobConfigWriter",
+            PKG + "SampleJsonBatchJobConfigSkipListener",
+            PKG + "SampleXmlBatchJobConfigConfiguration",
+            PKG + "SampleXmlBatchJobConfigReader",
+            PKG + "SampleXmlBatchJobConfigProcessor",
+            PKG + "SampleXmlBatchJobConfigWriter",
+            PKG + "SampleXmlBatchJobConfigSkipListener",
+
             // Generated for SampleBatchExportJobConfig (@BatchExportJob)
             PKG + "SampleBatchExportJobConfigExportConfiguration",
             PKG + "SampleBatchExportJobConfigExportReader",

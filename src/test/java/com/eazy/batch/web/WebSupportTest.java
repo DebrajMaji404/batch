@@ -61,6 +61,31 @@ class WebSupportTest {
     }
 
     @Test
+    void jsonTemplateHasTypedSamples() {
+        String json = new String(TemplateGenerator.generate(Dto.class, FileType.JSON, null), StandardCharsets.UTF_8);
+        assertThat(json).contains("\"Name\": \"Asha\"").contains("\"Level\": \"LOW\"").contains("\"Age\": 1");
+        assertThat(TemplateGenerator.contentType(FileType.JSON)).isEqualTo("application/json");
+        assertThat(TemplateGenerator.extension(FileType.JSON)).isEqualTo("json");
+    }
+
+    @Test
+    void xmlTemplateUsesValidElementNames() {
+        String xml = new String(TemplateGenerator.generate(Dto.class, FileType.XML, null), StandardCharsets.UTF_8);
+        assertThat(xml).contains("<rows>").contains("<Name>Asha</Name>").contains("<Age>1</Age>");
+        assertThat(TemplateGenerator.xmlName("Student Name")).isEqualTo("Student_Name");
+        assertThat(TemplateGenerator.xmlName("1st")).isEqualTo("_1st");
+    }
+
+    @Test
+    void guardCountsJsonAndXmlRecords(@TempDir Path dir) throws Exception {
+        Path json = dir.resolve("a.json");
+        Files.writeString(json, "[{\"a\":1},{\"a\":2},{\"a\":3}]");
+        new UploadGuard(1, 3).checkRows(json, FileType.JSON, 0, null);
+        assertThatThrownBy(() -> new UploadGuard(1, 2).checkRows(json, FileType.JSON, 0, null))
+                .hasMessageContaining("3 rows");
+    }
+
+    @Test
     void guardRejectsWrongTypeEmptyAndOversize() {
         UploadGuard guard = new UploadGuard(1, 0);
         assertThatThrownBy(() -> guard.checkName("a.txt", FileType.EXCEL)).isInstanceOf(UploadGuard.UploadRejectedException.class);

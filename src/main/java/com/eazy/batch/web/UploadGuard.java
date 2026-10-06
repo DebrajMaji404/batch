@@ -53,7 +53,11 @@ public final class UploadGuard {
     /** Counts data rows (header excluded) of an already stored file. */
     public void checkRows(Path file, FileType type, int sheetIndex, String sheetName) {
         if (maxRows <= 0) return;
-        long rows = type == FileType.CSV ? csvRows(file) : type == FileType.EXCEL ? excelRows(file, sheetIndex, sheetName) : -1;
+        long rows = switch (type) {
+            case CSV -> csvRows(file);
+            case EXCEL -> excelRows(file, sheetIndex, sheetName);
+            case JSON, XML -> com.eazy.batch.reader.StructuredFileItemReader.countRecords(file, type);
+        };
         if (rows > maxRows) {
             throw new UploadRejectedException("The file has " + rows + " rows; at most " + maxRows + " are allowed.");
         }

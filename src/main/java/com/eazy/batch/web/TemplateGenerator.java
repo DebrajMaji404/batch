@@ -1,5 +1,6 @@
 package com.eazy.batch.web;
 
+import com.eazy.batch.annotation.ExcelDateFormat;
 import com.eazy.batch.enums.FileType;
 import com.poiji.annotation.ExcelCellName;
 import org.apache.poi.ss.usermodel.Cell;
@@ -14,7 +15,12 @@ import java.io.IOException;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -26,8 +32,14 @@ import java.util.List;
  */
 public final class TemplateGenerator {
 
-    public record Column(String header, String type, boolean required, String sample, String allowed) {
+    /** How a value is written in a JSON template: as a bare number/boolean, or as a string. */
+    public enum Kind { STRING, NUMBER, BOOLEAN }
+
+    public record Column(String header, String type, boolean required, String sample, String allowed,
+                         String format, Kind kind) {
     }
+
+    private static final LocalDate SAMPLE_DATE = LocalDate.of(2025, 1, 31);
 
     private TemplateGenerator() {
     }
@@ -37,29 +49,67 @@ public final class TemplateGenerator {
         for (Field field : dto.getDeclaredFields()) {
             ExcelCellName name = field.getAnnotation(ExcelCellName.class);
             if (name == null) continue;
-            String allowed = field.getType().isEnum() ? enumValues(field.getType()) : "";
+            Class<?> type = field.getType();
+            String allowed = type.isEnum() ? enumValues(type) : "";
+            String format = type == LocalDate.class ? datePattern(field) : type == LocalDateTime.class ? "yyyy-MM-dd'T'HH:mm:ss" : "";
+
             String sample = stringAttribute(field, "ExcelSampleData", "value");
-            if ((sample == null || sample.isBlank()) && !allowed.isEmpty()) {
-                sample = allowed.split(", ")[0];
-            }
-            columns.add(new Column(name.value(), field.getType().getSimpleName(), isRequired(field),
-                    sample == null ? "" : sample, allowed));
+            if (sample == null || sample.isBlank()) sample = defaultSample(type, allowed, format);
+
+            columns.add(new Column(name.value(), type.getSimpleName(), isRequired(field), sample, allowed, format, kindOf(type)));
         }
         return columns;
     }
 
+    private static Kind kindOf(Class<?> t) {
+        if (t == Boolean.class || t == boolean.class) return Kind.BOOLEAN;
+        if (Number.class.isAssignableFrom(t) || (t.isPrimitive() && t != char.class)) return Kind.NUMBER;
+        return Kind.STRING;
+    }
+
+    /** A value that parses for the field's type, so a template filled in as-is is valid. */
+    private static String defaultSample(Class<?> t, String allowed, String format) {
+        if (!allowed.isEmpty()) return allowed.split(", ")[0];
+        if (t == LocalDate.class) return SAMPLE_DATE.format(DateTimeFormatter.ofPattern(format));
+        if (t == LocalDateTime.class) return "2025-01-31T09:30:00";
+        if (t == Boolean.class || t == boolean.class) return "true";
+        if (t == Integer.class || t == int.class || t == Long.class || t == long.class
+                || t == Short.class || t == short.class || t == BigInteger.class) return "1";
+        if (t == Double.class || t == double.class || t == Float.class || t == float.class || t == BigDecimal.class) return "1.5";
+        return "text";
+    }
+
+    private static String datePattern(Field field) {
+        ExcelDateFormat f = field.getAnnotation(ExcelDateFormat.class);
+        return f != null ? f.pattern() : "yyyy-MM-dd";
+    }
+
     public static byte[] generate(Class<?> dto, FileType fileType, String sheetName) {
         List<Column> columns = columns(dto);
-        return fileType == FileType.CSV ? csv(columns) : excel(columns, sheetName);
+        return switch (fileType) {
+            case CSV -> csv(columns);
+            case JSON -> json(columns);
+            case XML -> xml(columns);
+            case EXCEL -> excel(columns, sheetName);
+        };
     }
 
     public static String contentType(FileType fileType) {
-        return fileType == FileType.CSV ? "text/csv"
-                : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+        return switch (fileType) {
+            case CSV -> "text/csv";
+            case JSON -> "application/json";
+            case XML -> "application/xml";
+            case EXCEL -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+        };
     }
 
     public static String extension(FileType fileType) {
-        return fileType == FileType.CSV ? "csv" : "xlsx";
+        return switch (fileType) {
+            case CSV -> "csv";
+            case JSON -> "json";
+            case XML -> "xml";
+            case EXCEL -> "xlsx";
+        };
     }
 
     private static byte[] excel(List<Column> columns, String sheetName) {
@@ -82,7 +132,7 @@ public final class TemplateGenerator {
 
             Sheet help = wb.createSheet("Instructions");
             Row hr = help.createRow(0);
-            String[] titles = {"Column", "Required", "Type", "Example", "Allowed values"};
+            String[] titles = {"Column", "Required", "Type", "Example", "Allowed values", "Format"};
             for (int i = 0; i < titles.length; i++) {
                 Cell c = hr.createCell(i);
                 c.setCellValue(titles[i]);
@@ -97,6 +147,7 @@ public final class TemplateGenerator {
                 row.createCell(2).setCellValue(c.type());
                 row.createCell(3).setCellValue(c.sample());
                 row.createCell(4).setCellValue(c.allowed());
+                row.createCell(5).setCellValue(c.format());
             }
             Row note = help.createRow(r + 1);
             note.createCell(0).setCellValue("Delete the example row on the first sheet, then fill in your data. Keep the header row unchanged.");
@@ -106,6 +157,55 @@ public final class TemplateGenerator {
         } catch (IOException e) {
             throw new IllegalStateException("Could not build the template: " + e.getMessage(), e);
         }
+    }
+
+    private static byte[] json(List<Column> columns) {
+        StringBuilder sb = new StringBuilder("[\n  {\n");
+        for (int i = 0; i < columns.size(); i++) {
+            Column c = columns.get(i);
+            String value = c.kind() == Kind.STRING || c.sample().isBlank() ? jsonString(c.sample()) : c.sample();
+            sb.append("    ").append(jsonString(c.header())).append(": ").append(value)
+                    .append(i < columns.size() - 1 ? ",\n" : "\n");
+        }
+        return sb.append("  }\n]\n").toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static byte[] xml(List<Column> columns) {
+        StringBuilder sb = new StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<rows>\n  <row>\n");
+        for (Column c : columns) {
+            String tag = xmlName(c.header());
+            sb.append("    <").append(tag).append(">").append(xmlText(c.sample())).append("</").append(tag).append(">\n");
+        }
+        return sb.append("  </row>\n</rows>\n").toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static String jsonString(String s) {
+        StringBuilder sb = new StringBuilder("\"");
+        for (char ch : (s == null ? "" : s).toCharArray()) {
+            switch (ch) {
+                case '"' -> sb.append("\\\"");
+                case '\\' -> sb.append("\\\\");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default -> {
+                    if (ch < 0x20) sb.append(String.format("\\u%04x", (int) ch));
+                    else sb.append(ch);
+                }
+            }
+        }
+        return sb.append('"').toString();
+    }
+
+    /** A header as an XML element name ("Student Name" -> "Student_Name"); the reader matches it back loosely. */
+    static String xmlName(String header) {
+        String name = (header == null ? "" : header).trim().replaceAll("[^A-Za-z0-9_.-]", "_");
+        if (name.isEmpty() || !Character.isLetter(name.charAt(0)) && name.charAt(0) != '_') name = "_" + name;
+        return name;
+    }
+
+    private static String xmlText(String s) {
+        return (s == null ? "" : s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
     private static byte[] csv(List<Column> columns) {

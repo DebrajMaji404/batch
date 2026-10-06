@@ -30,7 +30,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.Principal;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -113,6 +115,25 @@ public class BatchApiController {
             log.error("Could not start job '{}'", jobName, e);
             return error(500, "Could not start the job: " + e.getMessage());
         }
+    }
+
+    /** The jobs that accept uploads, with their file type and the URLs to use - lets a UI build itself from the server. */
+    @GetMapping("/jobs")
+    public List<Map<String, Object>> jobs() {
+        String base = properties.getApi().getBasePath();
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (ReportSpec spec : ReportSpecRegistry.all()) {
+            Map<String, Object> job = new LinkedHashMap<>();
+            job.put("jobName", spec.jobName());
+            job.put("fileType", spec.fileType());
+            job.put("fileExtension", TemplateGenerator.extension(spec.fileType()));
+            job.put("reportType", spec.reportType());
+            job.put("uploadUrl", base + "/" + spec.jobName() + "/upload");
+            job.put("templateUrl", base + "/" + spec.jobName() + "/template");
+            out.add(job);
+        }
+        out.sort(java.util.Comparator.comparing(j -> String.valueOf(j.get("jobName"))));
+        return out;
     }
 
     @GetMapping("/{jobName}/template")

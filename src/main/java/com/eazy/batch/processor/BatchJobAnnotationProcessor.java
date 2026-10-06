@@ -158,10 +158,6 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             throw new IllegalArgumentException(
                     "readerType=" + readerType + " is not implemented yet. Only ReaderType.FILE is currently supported.");
         }
-        if (fileType != FileType.CSV && fileType != FileType.EXCEL) {
-            throw new IllegalArgumentException(
-                    "fileType=" + fileType + " is not implemented yet. Only FileType.CSV and FileType.EXCEL are currently supported.");
-        }
         // FIXED: partitioned/incremental were declared but silently ignored -
         // set them to true and nothing happened, no partition handler or
         // checkpoint logic was ever generated. Fail fast instead, consistent
@@ -337,6 +333,9 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println();
             if (fileType == FileType.CSV) {
                 out.println("import com.eazy.batch.reader.CSVItemReader;");
+            } else if (fileType == FileType.JSON || fileType == FileType.XML) {
+                out.println("import com.eazy.batch.reader.StructuredFileItemReader;");
+                out.println("import com.eazy.batch.enums.FileType;");
             } else {
                 out.println("import com.eazy.batch.reader.ExcelItemReaderWithHeaderValidation;");
             }
@@ -356,6 +355,8 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(INDENT + "@StepScope");
             if (fileType == FileType.CSV) {
                 out.println(INDENT + "public CSVItemReader<" + dtoClassName + "> " + stepName + "ItemReader(");
+            } else if (fileType == FileType.JSON || fileType == FileType.XML) {
+                out.println(INDENT + "public StructuredFileItemReader<" + dtoClassName + "> " + stepName + "ItemReader(");
             } else {
                 out.println(INDENT + "public ExcelItemReaderWithHeaderValidation<" + dtoClassName + "> " + stepName + "ItemReader(");
             }
@@ -363,6 +364,8 @@ public class BatchJobAnnotationProcessor extends AbstractProcessor {
             out.println(DOUBLE_INDENT + "log.debug(\"Initializing " + fileType + " reader for file: {}\", filePath);");
             if (fileType == FileType.CSV) {
                 out.println(DOUBLE_INDENT + "return new CSVItemReader<>(new FileSystemResource(filePath), " + dtoClassName + ".class);");
+            } else if (fileType == FileType.JSON || fileType == FileType.XML) {
+                out.println(DOUBLE_INDENT + "return new StructuredFileItemReader<>(new FileSystemResource(filePath), " + dtoClassName + ".class, FileType." + fileType.name() + ");");
             } else {
                 out.println(DOUBLE_INDENT + "return new ExcelItemReaderWithHeaderValidation<>(");
                 out.println(QUAD_INDENT + "new FileSystemResource(filePath), " + dtoClassName + ".class, " + sheetIndex + ", " + (sheetName.isEmpty() ? "null" : "\"" + sheetName + "\"") + ");");

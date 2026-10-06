@@ -3,7 +3,8 @@ package com.eazy.batch.enums;
 import lombok.Getter;
 
 /**
- * Supported file types for batch processing
+ * Supported upload file types for {@code @BatchJob}. EXCEL and CSV have a header row; JSON and
+ * XML are lists of flat records (see {@code StructuredFileItemReader}).
  */
 @Getter
 public enum FileType {
